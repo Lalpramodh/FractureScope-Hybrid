@@ -1,7 +1,7 @@
 import os
 from datetime import datetime
 
-import pymysql
+import sqlite3
 import torch
 from flask import Flask, render_template, request, redirect, session, url_for, flash
 from PIL import Image
@@ -37,16 +37,34 @@ transform = transforms.Compose([
 ])
 class_names = ["Wrist Fracture", "Humorous Fracture", "Elbow Fracture", "Forearm Fracture"]
 
+DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "fracturescope.db"))
+
 def get_db():
-    return pymysql.connect(
-        host=os.getenv("MYSQL_HOST", "localhost"),
-        user=os.getenv("MYSQL_USER", "root"),
-        password=os.getenv("MYSQL_PASSWORD", "password"),
-        database=os.getenv("MYSQL_DB", "fracturescope_db"),
-        port=int(os.getenv("MYSQL_PORT", "3306")),
-        cursorclass=pymysql.cursors.Cursor,
-        autocommit=False,
-    )
+    conn = sqlite3.connect(DB_PATH, timeout=30)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+def init_db():
+    conn = get_db()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            email TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            image_path TEXT NOT NULL,
+            prediction TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+init_db()
 
 def load_swin_model():
     global swin_model
@@ -90,7 +108,7 @@ def login():
         try:
             conn = get_db()
             cur = conn.cursor()
-            cur.execute("SELECT * FROM users WHERE email=%s", (email,))
+            cur.execute("SELECT id, username, email, password FROM users WHERE email = ?", (email,))
             user = cur.fetchone()
             cur.close()
             conn.close()
@@ -98,9 +116,9 @@ def login():
             flash("Database connection failed. Please try again later.", "danger")
             return redirect(url_for("login"))
 
-        if user and check_password_hash(user[3], password):
-            session["username"] = user[1]
-            session["email"] = user[2]
+        if user and check_password_hash(user["password"], password):
+            session["username"] = user["username"]
+            session["email"] = user["email"]
             return redirect(url_for("home"))
         flash("Invalid credentials. Please try again or register.", "danger")
         return redirect(url_for("login"))
@@ -115,14 +133,14 @@ def register():
         try:
             conn = get_db()
             cur = conn.cursor()
-            cur.execute("SELECT * FROM users WHERE email=%s", (email,))
+            cur.execute("SELECT id, username, email, password FROM users WHERE email = ?", (email,))
             if cur.fetchone():
                 cur.close()
                 conn.close()
                 flash("Email already registered. Please login.", "warning")
                 return redirect(url_for("login"))
             cur.execute(
-                "INSERT INTO users (username, email, password) VALUES (%s, %s, %s)",
+                "INSERT INTO users (username, email, password) VALUES (?, ?, ?)",
                 (username, email, password),
             )
             conn.commit()
@@ -187,7 +205,7 @@ def profile():
     conn = get_db()
     cur = conn.cursor()
     cur.execute(
-        "SELECT prediction, timestamp FROM predictions WHERE username=%s ORDER BY timestamp DESC",
+        "SELECT prediction, timestamp FROM predictions WHERE username = ? ORDER BY timestamp DESC",
         (username,),
     )
     rows = cur.fetchall()
@@ -246,7 +264,7 @@ def predict():
         conn = get_db()
         cur = conn.cursor()
         cur.execute(
-            "INSERT INTO predictions (username, image_path, prediction) VALUES (%s, %s, %s)",
+            "INSERT INTO predictions (username, image_path, prediction) VALUES (?, ?, ?)",
             (session["username"], filepath, result),
         )
         conn.commit()
