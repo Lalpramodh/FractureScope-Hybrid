@@ -1,0 +1,6 @@
+FractureScope Render ML stability fix
+- YOLO is loaded lazily only when /predict is called.
+- Native BLAS/OpenMP threads are limited to 1.
+- OpenCV headless is used.
+- Gunicorn remains single-worker/single-thread.
+- Keep model.pth in the repository through Git LFS.

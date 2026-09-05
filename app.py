@@ -1,4 +1,8 @@
 import os
+# Keep native ML libraries conservative on small Render instances.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
 from datetime import datetime
 
 import sqlite3
@@ -27,8 +31,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 YOLO_MODEL_PATH = os.getenv("YOLO_MODEL_PATH", os.path.join(BASE_DIR, "yolov8_model.pt"))
 SWIN_MODEL_PATH = os.getenv("SWIN_MODEL_PATH", os.path.join(BASE_DIR, "model.pth"))
 
-yolo_model = YOLO(YOLO_MODEL_PATH)
-
+yolo_model = None
 swin_model = None
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
@@ -65,6 +68,19 @@ def init_db():
     conn.close()
 
 init_db()
+
+def load_yolo_model():
+    """Load YOLO only when a prediction is requested, not when Gunicorn boots."""
+    global yolo_model
+    if yolo_model is not None:
+        return yolo_model
+    if not os.path.exists(YOLO_MODEL_PATH):
+        raise FileNotFoundError(
+            f"YOLO model not found at {YOLO_MODEL_PATH}. Add yolov8_model.pt to the repository."
+        )
+    model = YOLO(YOLO_MODEL_PATH)
+    yolo_model = model
+    return yolo_model
 
 def load_swin_model():
     global swin_model
@@ -243,7 +259,8 @@ def predict():
     relative_path = os.path.join("uploads", filename).replace("\\", "/")
 
     try:
-        yolo_result = yolo_model(filepath)[0]
+        yolo = load_yolo_model()
+        yolo_result = yolo(filepath, verbose=False)[0]
         boxes = yolo_result.boxes
         if boxes is None or len(boxes) == 0:
             result = "No fracture detected"

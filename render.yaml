@@ -3,9 +3,15 @@ services:
     name: fracturescope
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --threads 2 --timeout 300
+    startCommand: gunicorn app:app --workers 1 --threads 1 --timeout 300 --max-requests 50 --max-requests-jitter 10
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: YOLO_CONFIG_DIR
+        value: /tmp/Ultralytics
       - key: SECRET_KEY
         generateValue: true
