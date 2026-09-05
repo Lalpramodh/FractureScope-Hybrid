@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <!-- Basic -->
+  <meta charset="utf-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <!-- Mobile Metas -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no" />
+  <!-- Site Metas -->
+  <meta name="keywords" content="" />
+  <meta name="description" content="" />
+  <meta name="author" content="" />
+<link rel="shortcut icon" href="{{ url_for('static', filename='images/favicon.png') }}" type="image/png" />
+
+  <title> Orthoc </title>
+
+  <!-- bootstrap core css -->
+<link rel="stylesheet" type="text/css" href="{{ url_for('static', filename='styles/bootstrap.css') }}" />
+
+  <!-- fonts style -->
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&display=swap" rel="stylesheet">
+
+  <!--owl slider stylesheet -->
+  <link rel="stylesheet" type="text/css" href="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/assets/owl.carousel.min.css" />
+
+  <!-- font awesome style -->
+<link rel="stylesheet" href="{{ url_for('static', filename='styles/font-awesome.min.css') }}" />
+
+  <!-- Custom styles for this template -->
+<link rel="stylesheet" href="{{ url_for('static', filename='styles/style.css') }}" />
+  <!-- responsive style -->
+<link rel="stylesheet" href="{{ url_for('static', filename='styles/responsive.css') }}" />
+
+</head>
+
+<body class="sub_page">
+  <div class="hero_area">
+    <div class="hero_bg_box">
+      <img src="{{ url_for('static', filename='images/hero-bg.png') }}" alt="">
+    </div>
+
+ <!-- header section strats -->
+    <header class="header_section">
+      <div class="container">
+        <nav class="navbar navbar-expand-lg custom_nav-container ">
+          <a class="navbar-brand" href="{{ url_for('home') }}">
+            <span>
+              FractureScope
+            </span>
+          </a>
+
+          <button class="navbar-toggler" type="button" data-toggle="collapse" data-target="#navbarSupportedContent" aria-controls="navbarSupportedContent" aria-expanded="false" aria-label="Toggle navigation">
+            <span class=""> </span>
+          </button>
+
+          <div class="collapse navbar-collapse" id="navbarSupportedContent">
+            <ul class="navbar-nav">
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('home') }}">Home</a>
+              </li>
+              <li class="nav-item active">
+               <a class="nav-link" href="{{ url_for('about') }}">About <span class="sr-only">(current)</span></a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('analysis') }}">Analysis</a>
+              </li>
+              <li class="nav-item">
+                <a class="nav-link" href="{{ url_for('profile') }}">Profile</a>
+              </li>
+              <form class="form-inline">
+                <button class="btn  my-2 my-sm-0 nav_search-btn" type="submit">
+                  <i class="fa fa-search" aria-hidden="true"></i>
+                </button>
+              </form>
+            </ul>
+          </div>
+        </nav>
+      </div>
+    </header>
+  </div>
+
+
+
+  <!-- department section -->
+
+  <section class="department_section layout_padding">
+    <div class="department_container">
+      <div class="container ">
+        <div class="heading_container heading_center">
+          <h2>
+            Detailed Fracture Analysis
+          </h2>
+        </div>
+
+    
+<!-- Analysis Content -->
+<div class="container">
+  <div class="card p-4">
+
+  <!-- Dynamic Analysis Section -->
+ <div class="section">
+    <p>
+      This analysis page provides detailed information about the type and location of the detected fracture based on your uploaded X-ray. 
+      The AI model has identified a potential fracture in one of the following areas: <strong>Elbow</strong>, <strong>Forearm</strong>, 
+      <strong>Shoulder</strong>, or <strong>Hand</strong>. Please review the information below and consult a medical professional for 
+      confirmation and treatment.
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>Fracture Types Explained</h2>
+
+    <h3>1. Elbow Fracture</h3>
+    <p>
+      Often caused by falls or direct trauma. Symptoms include pain, swelling, reduced mobility, and tenderness around the elbow joint.
+    </p>
+
+    <h3>2. Forearm Fracture</h3>
+    <p>
+      Affects the radius and/or ulna bones. Common in sports injuries or accidents. Symptoms include intense pain, bruising, and visible deformity.
+    </p>
+
+    <h3>3. Shoulder Fracture</h3>
+    <p>
+      Usually involves the clavicle or humerus near the shoulder. Signs include shoulder pain, swelling, and inability to lift the arm.
+    </p>
+
+    <h3>4. Hand Fracture</h3>
+    <p>
+      Can affect the fingers, metacarpals, or wrist bones. Typical symptoms include pain, stiffness, and difficulty gripping objects.
+    </p>
+  </div>
+
+  <div class="section">
+    <h2>What Should You Do Next?</h2>
+    <ul>
+      <li><strong>Consult a Doctor:</strong> Always seek immediate medical attention for a suspected fracture.</li>
+      <li><strong>Diagnostic Confirmation:</strong> Further imaging such as X-ray, CT scan, or MRI may be recommended by your doctor.</li>
+      <li><strong>Orthopedic Evaluation:</strong> An orthopedic specialist can assess the severity and determine the need for casting, splinting, or surgery.</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>Treatment & Medications</h2>
+    <ul>
+      <li><strong>Pain Relievers:</strong> NSAIDs (e.g., ibuprofen) or acetaminophen to manage pain and inflammation.</li>
+      <li><strong>Immobilization:</strong> Using a cast, splint, or brace to allow proper bone healing.</li>
+      <li><strong>Physical Therapy:</strong> Helps restore mobility and strength after immobilization.</li>
+      <li><strong>Surgery:</strong> In severe cases, internal fixation using plates, screws, or rods may be necessary.</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <p>
+      <strong>Note:</strong> This AI-based prediction is intended to support clinical decisions, not replace professional medical advice. 
+      Please consult a licensed physician for accurate diagnosis and treatment.
+    </p>
+  </div>
+  </section>
+
+  <!-- end department section -->
+
+ 
+  <!-- footer section -->
+  <footer class="footer_section">
+    <div class="container">
+      <div class="row">
+        <div class="col-md-6 col-lg-3 footer_col">
+          <div class="footer_contact">
+            <h4>
+              Reach at..
+            </h4>
+            <div class="contact_link_box">
+              <a href="">
+                <i class="fa fa-map-marker" aria-hidden="true"></i>
+                <span>
+                  Location
+                </span>
+              </a>
+              <a href="">
+                <i class="fa fa-phone" aria-hidden="true"></i>
+                <span>
+                  Call +91 7569571468
+                </span>
+              </a>
+              <a href="">
+                <i class="fa fa-envelope" aria-hidden="true"></i>
+                <span>
+                  lalpramodhbonela@gmail.com
+                </span>
+              </a>
+            </div>
+          </div>
+          <div class="footer_social">
+            <a href="">
+              <i class="fa fa-whatsapp" aria-hidden="true"></i>
+            </a>
+            <a href="">
+              <i class="fa fa-linkedin" aria-hidden="true"></i>
+            </a>
+            <a href="">
+              <i class="fa fa-instagram" aria-hidden="true"></i>
+            </a>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3 footer_col">
+          <div class="footer_detail">
+            <h4>
+              About
+            </h4>
+            <p>
+            Our system provides intelligent and reliable fracture detection, offering high accuracy and speed, while simplifying diagnosis through a user-friendly interface that supports medical professionals in critical decision-making.
+            </p>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-2 mx-auto footer_col">
+          <div class="footer_link_box">
+            <h4>
+              Links
+            </h4>
+            <div class="footer_links">
+              <a class="{% if request.endpoint == 'home' %}active{% endif %}" href="{{ url_for('home') }}">Home</a>
+              </a>
+              <a class="{% if request.endpoint == 'about' %}active{% endif %}" href="{{ url_for('about') }}">About</a>
+              </a>
+              <a class="{% if request.endpoint == 'analysis' %}active{% endif %}" href="{{ url_for('analysis') }}">Analysis</a>
+              </a>
+              <a class="{% if request.endpoint == 'profile' %}active{% endif %}" href="{{ url_for('profile') }}">Profile</a>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3 footer_col ">
+          <h4>
+            Newsletter
+          </h4>
+          <form action="#">
+            <input type="email" placeholder="Enter email" />
+            <button type="submit">
+              Subscribe
+            </button>
+          </form>
+        </div>
+      </div>
+      <div class="footer-info">
+        <p>
+          &copy; <span id="displayYear"></span> Copyright ©2025 FractureScope. All Rights Reserved | FractureScope
+        </p>
+       
+      </div>  
+    </div>
+  </footer>
+  <!-- footer section -->
+
+  <!-- jQery -->
+  <script type="text/javascript" src="{{ url_for('static', filename='scripts/jquery-3.4.1.min.js') }}"></script>
+  <!-- popper js -->
+  <script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js" integrity="sha384-Q6E9RHvbIyZFJoft+2mJbHaEWldlvI9IOYy5n3zV9zzTtmI3UksdQRVvoxMfooAo" crossorigin="anonymous">
+  </script>
+  <!-- bootstrap js -->
+  <script type="text/javascript" src="{{ url_for('static', filename='scripts/bootstrap.js') }}"></script>
+  <!-- owl slider -->
+  <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/OwlCarousel2/2.3.4/owl.carousel.min.js">
+  </script>
+  <!-- custom js -->
+  <script type="text/javascript" src="{{ url_for('static', filename='scripts/custom.js') }}"></script>
+  <!-- Google Map -->
+  <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCh39n5U-4IoWpsVGUHWdqB6puEkhRLdmI&callback=myMap">
+  </script>
+  <!-- End Google Map -->
+
+</body>
+
+</html>
