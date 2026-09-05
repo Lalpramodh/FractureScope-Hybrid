@@ -1,12 +1,5 @@
-MODEL REQUIRED FOR PREDICTION
-Place the 333 MB model.pth file in the project root:
-    model.pth
+FractureScope deployment model
 
-Because GitHub blocks normal files larger than 100 MB, use Git LFS:
-    git lfs install
-    git lfs track "model.pth"
-    git add .gitattributes model.pth
-    git commit -m "Add Swin Transformer model"
-    git push origin main
-
-The application can boot without model.pth, but /predict will require it.
+This deployment uses yolov8_model.pt as the ONLY inference model.
+The previous Swin Transformer model.pth is intentionally NOT used.
+Do not add model.pth for this version.
