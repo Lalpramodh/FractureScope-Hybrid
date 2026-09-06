@@ -31,6 +31,12 @@ from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
 Image.MAX_IMAGE_PIXELS = 50_000_000
+torch.set_num_threads(1)
+try:
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    # Torch inter-op threads can only be configured before parallel work starts.
+    pass
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = Path(os.getenv("YOLO_MODEL_PATH", BASE_DIR / "yolov8_model.pt"))
@@ -173,11 +179,35 @@ def load_yolo_model():
             "verbose": False,
         })
         detector.fuse()
+        warmup_started = time.perf_counter()
+        warmup_image = Image.new("RGB", (INFERENCE_SIZE, INFERENCE_SIZE))
+        try:
+            with torch.inference_mode():
+                warmup_results = detector.predict(
+                    source=warmup_image,
+                    device="cpu",
+                    imgsz=INFERENCE_SIZE,
+                    batch=1,
+                    half=False,
+                    max_det=20,
+                    verbose=False,
+                    save=False,
+                    show=False,
+                    stream=False,
+                )
+        finally:
+            warmup_image.close()
+            if "warmup_results" in locals():
+                del warmup_results
+            gc.collect()
+        torch.set_num_threads(1)
         _model = detector
         app.logger.info(
-            "MODEL LOAD COMPLETE pid=%s elapsed=%.2fs",
+            "MODEL LOAD COMPLETE pid=%s elapsed=%.2fs warmup=%.2fs torch_threads=%s",
             os.getpid(),
             time.perf_counter() - model_started,
+            time.perf_counter() - warmup_started,
+            torch.get_num_threads(),
         )
         return _model
 
