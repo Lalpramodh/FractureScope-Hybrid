@@ -20,5 +20,7 @@ services:
         value: "1"
       - key: YOLO_CONFIG_DIR
         value: /tmp/Ultralytics
+      - key: SWIN_EXCLUSIVE_MEMORY
+        value: "true"
       - key: PYTHONUNBUFFERED
         value: "1"

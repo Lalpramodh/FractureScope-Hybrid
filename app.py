@@ -33,6 +33,11 @@ from timm.data import create_transform
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
+try:
+    import psutil
+except ImportError:  # Optional; Render diagnostics still work without it.
+    psutil = None
+
 Image.MAX_IMAGE_PIXELS = 50_000_000
 torch.set_num_threads(1)
 try:
@@ -74,6 +79,34 @@ MAX_INFERENCE_DIMENSION = 2048
 SWIN_INPUT_SIZE = 224
 SWIN_CROP_PADDING = float(os.getenv("SWIN_CROP_PADDING", "0.08"))
 SWIN_CLASS_NAMES = [name.strip() for name in os.getenv("SWIN_CLASS_NAMES", "").split(",") if name.strip()]
+SWIN_EXCLUSIVE_MEMORY = os.getenv("SWIN_EXCLUSIVE_MEMORY", "true").lower() == "true"
+
+
+def reclaim_process_memory():
+    gc.collect()
+    if os.name != "nt":
+        try:
+            import ctypes
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (OSError, AttributeError):
+            pass
+
+
+def release_yolo_for_swin():
+    global _model
+    if _model is not None:
+        app.logger.info("Releasing YOLO memory for Swin classification")
+        _model = None
+        reclaim_process_memory()
+
+
+def release_swin_after_prediction():
+    global _swin_model, _swin_transform
+    if _swin_model is not None:
+        app.logger.info("Releasing Swin memory after classification")
+        _swin_model = None
+        _swin_transform = None
+        reclaim_process_memory()
 
 
 def using_postgres():
@@ -266,7 +299,21 @@ def yolo_predict(filepath):
             os.getpid(),
             time.perf_counter() - inference_started,
         )
-        return results[0] if results else None
+        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+            return {"detections": [], "inference_size": None}
+        result = results[0]
+        names = result.names or getattr(detector, "names", {})
+        detections = []
+        for index in range(len(result.boxes)):
+            detections.append({
+                "raw_bbox": [float(value) for value in result.boxes.xyxy[index].tolist()],
+                "yolo_class_id": int(result.boxes.cls[index].item()),
+                "yolo_class": names.get(int(result.boxes.cls[index].item()), str(int(result.boxes.cls[index].item()))) if isinstance(names, dict) else str(int(result.boxes.cls[index].item())),
+                "yolo_confidence": float(result.boxes.conf[index].item()),
+            })
+        with Image.open(inference_path) as inference_image:
+            inference_size = inference_image.size
+        return {"detections": detections, "inference_size": inference_size}
     finally:
         if results:
             del results
@@ -286,47 +333,65 @@ def load_swin_model():
         if not SWIN_MODEL_PATH.is_file():
             raise FileNotFoundError(f"Swin model not found at {SWIN_MODEL_PATH}")
         started = time.perf_counter()
-        app.logger.info("Loading Swin Transformer from %s", SWIN_MODEL_PATH)
-        checkpoint = torch.load(SWIN_MODEL_PATH, map_location="cpu", weights_only=True)
-        if not isinstance(checkpoint, dict) or "head.fc.weight" not in checkpoint:
-            raise ValueError("Swin checkpoint is not a supported timm state dict")
-        class_count = int(checkpoint["head.fc.weight"].shape[0])
-        if len(SWIN_CLASS_NAMES) not in (0, class_count):
-            raise ValueError(f"SWIN_CLASS_NAMES must contain exactly {class_count} labels")
-        model = timm.create_model(
-            "swin_base_patch4_window7_224",
-            pretrained=False,
-            num_classes=class_count,
-        )
-        model.load_state_dict(checkpoint, strict=True)
-        model.to("cpu").eval()
-        _swin_transform = create_transform(
-            input_size=(3, SWIN_INPUT_SIZE, SWIN_INPUT_SIZE),
-            is_training=False,
-            mean=(0.485, 0.456, 0.406),
-            std=(0.229, 0.224, 0.225),
-            interpolation="bicubic",
-        )
-        _swin_model = model
-        labels = SWIN_CLASS_NAMES or [f"Checkpoint class {index}" for index in range(class_count)]
-        app.logger.info(
-            "Swin Transformer loaded in %.2fs architecture=swin_base_patch4_window7_224 classes=%s labels=%s",
-            time.perf_counter() - started,
-            class_count,
-            labels,
-        )
-        return _swin_model, _swin_transform
+        app.logger.info("Swin lazy loading started path=%s", SWIN_MODEL_PATH)
+        if psutil is not None:
+            app.logger.info("Memory before Swin load: %.1f MB", psutil.Process().memory_info().rss / 1048576)
+        checkpoint = None
+        model = None
+        try:
+            checkpoint = torch.load(SWIN_MODEL_PATH, map_location="cpu", weights_only=True, mmap=True)
+            if not isinstance(checkpoint, dict) or "head.fc.weight" not in checkpoint:
+                raise ValueError("Swin checkpoint is not a supported timm state dict")
+            class_count = int(checkpoint["head.fc.weight"].shape[0])
+            if len(SWIN_CLASS_NAMES) not in (0, class_count):
+                raise ValueError(f"SWIN_CLASS_NAMES must contain exactly {class_count} labels")
+            model = timm.create_model(
+                "swin_base_patch4_window7_224",
+                pretrained=False,
+                num_classes=class_count,
+            )
+            model = model.half()
+            model_state = model.state_dict()
+            with torch.no_grad():
+                for key, value in checkpoint.items():
+                    model_state[key].copy_(value)
+            del model_state
+            model.to("cpu").eval()
+            _swin_transform = create_transform(
+                input_size=(3, SWIN_INPUT_SIZE, SWIN_INPUT_SIZE),
+                is_training=False,
+                mean=(0.485, 0.456, 0.406),
+                std=(0.229, 0.224, 0.225),
+                interpolation="bicubic",
+            )
+            _swin_model = model
+            labels = SWIN_CLASS_NAMES or [f"Checkpoint class {index}" for index in range(class_count)]
+            if psutil is not None:
+                app.logger.info("Memory after Swin load: %.1f MB", psutil.Process().memory_info().rss / 1048576)
+            app.logger.info(
+                "Swin model loaded in %.2fs architecture=swin_base_patch4_window7_224 classes=%s labels=%s",
+                time.perf_counter() - started,
+                class_count,
+                labels,
+            )
+            return _swin_model, _swin_transform
+        finally:
+            del checkpoint
+            gc.collect()
 
 
 def classify_fracture(crop):
+    started = time.perf_counter()
+    app.logger.info("Swin classification started")
     model, transform = load_swin_model()
-    tensor = transform(crop.convert("RGB")).unsqueeze(0)
+    tensor = transform(crop.convert("RGB")).unsqueeze(0).half()
     try:
         with torch.inference_mode():
             probabilities = torch.softmax(model(tensor), dim=1)[0]
             class_id = int(probabilities.argmax().item())
             confidence = float(probabilities[class_id].item())
         labels = SWIN_CLASS_NAMES or [f"Checkpoint class {index}" for index in range(len(probabilities))]
+        app.logger.info("Swin classification completed in %.2fs", time.perf_counter() - started)
         return labels[class_id], confidence
     finally:
         del tensor
@@ -368,19 +433,18 @@ def run_hybrid_prediction(filepath):
     started = time.perf_counter()
     app.logger.info("Hybrid prediction started")
     results = yolo_predict(filepath)
-    if results is None or results.boxes is None or len(results.boxes) == 0:
+    if not results["detections"]:
         return {"detections": [], "summary": "No fracture detected"}, None
+    if SWIN_EXCLUSIVE_MEMORY:
+        release_yolo_for_swin()
     with Image.open(filepath) as original:
         original_image = original.convert("RGB")
         original_width, original_height = original_image.size
-    inference_path = prepare_inference_image(filepath)
     try:
-        with Image.open(inference_path) as inference_image:
-            inference_width, inference_height = inference_image.size
-        names = results.names or getattr(load_yolo_model(), "names", {})
+        inference_width, inference_height = results["inference_size"]
         detections = []
-        for index in range(len(results.boxes)):
-            raw_box = results.boxes.xyxy[index].tolist()
+        for index, yolo_detection in enumerate(results["detections"]):
+            raw_box = yolo_detection["raw_bbox"]
             scale_x = original_width / inference_width
             scale_y = original_height / inference_height
             bbox = [round(raw_box[0] * scale_x), round(raw_box[1] * scale_y), round(raw_box[2] * scale_x), round(raw_box[3] * scale_y)]
@@ -391,12 +455,12 @@ def run_hybrid_prediction(filepath):
             except Exception:
                 app.logger.exception("Swin classification failed for region %s", index + 1)
                 swin_class, swin_confidence = "Classification unavailable", None
-            class_id = int(results.boxes.cls[index].item())
-            yolo_label = names.get(class_id, str(class_id)) if isinstance(names, dict) else str(class_id)
+            finally:
+                crop.close()
             detections.append({
                 "bbox": bbox,
-                "yolo_class": yolo_label,
-                "yolo_confidence": float(results.boxes.conf[index].item()),
+                "yolo_class": yolo_detection["yolo_class"],
+                "yolo_confidence": yolo_detection["yolo_confidence"],
                 "swin_class": swin_class,
                 "swin_confidence": swin_confidence,
             })
@@ -405,10 +469,14 @@ def run_hybrid_prediction(filepath):
         app.logger.info("Hybrid prediction completed in %.2fs", time.perf_counter() - started)
         return result, annotated_path
     finally:
-        if inference_path != Path(filepath):
-            inference_path.unlink(missing_ok=True)
         del results
-        gc.collect()
+        if SWIN_EXCLUSIVE_MEMORY:
+            release_swin_after_prediction()
+            try:
+                load_yolo_model()
+            except Exception:
+                app.logger.exception("YOLO restoration failed after Swin classification")
+        reclaim_process_memory()
 
 
 def allowed_file(filename):
@@ -624,11 +692,12 @@ def predict():
 try:
     init_db()
     load_yolo_model()
-    try:
-        load_swin_model()
-    except Exception:
-        app.logger.exception("SWIN STARTUP FAILED; continuing with YOLO detection")
-    app.logger.info("WORKER READY pid=%s model_loaded=%s", os.getpid(), _model is not None)
+    app.logger.info(
+        "WORKER READY pid=%s yolo_loaded=%s swin_loaded=%s",
+        os.getpid(),
+        _model is not None,
+        _swin_model is not None,
+    )
 except Exception:
     app.logger.exception("WORKER STARTUP FAILED pid=%s", os.getpid())
     raise

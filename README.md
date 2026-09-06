@@ -6,7 +6,7 @@ AI-assisted X-ray fracture screening with a Flask web interface and a hybrid YOL
 
 - Python: `3.11.9`
 - Inference: YOLOv8 uses `yolov8_model.pt`; Swin uses the raw state dict in `model.pth`
-- Runtime: CPU-only, one cached instance of each model per worker, YOLO inference size `384`, Swin input size `224`
+- Runtime: CPU-only, one YOLO instance per worker, YOLO inference size `384`, Swin input size `224`; Render uses exclusive model residency because the worker has approximately 512 MiB RAM
 - Web server: one Gunicorn worker and one thread
 - Database: PostgreSQL in production or SQLite for local development
 - Health check: `/health`
@@ -28,7 +28,7 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Then open `http://localhost:5000/health` and confirm the response reports `status: healthy`. YOLOv8 and Swin are loaded once during worker startup and reused for authenticated `/predict` requests. Each YOLO box is padded, cropped from the original image, classified by Swin, and rendered on an annotated result image.
+Then open `http://localhost:5000/health` and confirm the response reports `status: healthy`. Startup loads YOLO only. On a positive detection, primitive YOLO boxes are retained, YOLO memory is released, Swin is lazy-loaded in CPU half precision, each crop is classified one at a time, Swin memory is released, and YOLO is restored for the next request. This exclusive lifecycle is enabled by `SWIN_EXCLUSIVE_MEMORY=true` and prevents the two large models from being resident together on the 512 MiB Render worker.
 
 ## Verified Swin checkpoint
 
