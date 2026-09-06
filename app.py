@@ -5,6 +5,7 @@ import logging
 import re
 import gc
 import tempfile
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -28,6 +29,8 @@ except ImportError:  # PostgreSQL is optional for local SQLite development.
 from ultralytics import YOLO
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
+
+Image.MAX_IMAGE_PIXELS = 50_000_000
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = Path(os.getenv("YOLO_MODEL_PATH", BASE_DIR / "yolov8_model.pt"))
@@ -53,6 +56,8 @@ if not os.getenv("DATABASE_URL"):
 
 _model = None
 _model_lock = threading.Lock()
+INFERENCE_SIZE = 384
+MAX_INFERENCE_DIMENSION = 2048
 
 
 def using_postgres():
@@ -157,7 +162,7 @@ def load_yolo_model():
         detector.to("cpu")
         detector.overrides.update({
             "device": "cpu",
-            "imgsz": 512,
+            "imgsz": INFERENCE_SIZE,
             "half": False,
             "verbose": False,
         })
@@ -168,15 +173,24 @@ def load_yolo_model():
 
 
 def yolo_predict(filepath):
+    prediction_started = time.perf_counter()
+    app.logger.info("Prediction started")
     detector = load_yolo_model()
+    preprocessing_started = time.perf_counter()
     inference_path = prepare_inference_image(filepath)
+    app.logger.info(
+        "Image preprocessing completed in %.2f seconds",
+        time.perf_counter() - preprocessing_started,
+    )
     results = None
     try:
+        inference_started = time.perf_counter()
+        app.logger.info("YOLO inference started")
         with torch.inference_mode():
             results = detector.predict(
                 source=str(inference_path),
                 device="cpu",
-                imgsz=512,
+                imgsz=INFERENCE_SIZE,
                 batch=1,
                 conf=0.25,
                 iou=0.45,
@@ -187,7 +201,15 @@ def yolo_predict(filepath):
                 show=False,
                 stream=False,
             )
+        app.logger.info(
+            "YOLO inference completed in %.2f seconds",
+            time.perf_counter() - inference_started,
+        )
         if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+            app.logger.info(
+                "Prediction result extracted in %.2f seconds: no detections",
+                time.perf_counter() - prediction_started,
+            )
             return "No fracture detected"
 
         result = results[0]
@@ -197,6 +219,10 @@ def yolo_predict(filepath):
         confidence = float(boxes.conf[best_index].item())
         names = result.names or getattr(detector, "names", {})
         label = names.get(class_id, str(class_id)) if isinstance(names, dict) else str(class_id)
+        app.logger.info(
+            "Prediction result extracted in %.2f seconds",
+            time.perf_counter() - prediction_started,
+        )
         return f"{label} ({confidence * 100:.2f}%)"
     finally:
         if results:
@@ -218,7 +244,7 @@ def save_upload(upload):
         image = Image.open(upload.stream)
         image.verify()
         upload.stream.seek(0)
-    except (UnidentifiedImageError, OSError) as exc:
+    except (UnidentifiedImageError, Image.DecompressionBombError, OSError) as exc:
         raise ValueError("The uploaded file is not a valid image.") from exc
     filename = f"{uuid4().hex}_{original_name}"
     filepath = UPLOAD_FOLDER / filename
@@ -232,9 +258,10 @@ def prepare_inference_image(filepath):
     with Image.open(source) as image:
         image.verify()
     with Image.open(source) as image:
-        if max(image.size) <= 2048:
+        app.logger.info("Inference image dimensions: %sx%s", image.width, image.height)
+        if max(image.size) <= MAX_INFERENCE_DIMENSION:
             return source
-        image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+        image.thumbnail((MAX_INFERENCE_DIMENSION, MAX_INFERENCE_DIMENSION), Image.Resampling.LANCZOS)
         temporary = tempfile.NamedTemporaryFile(suffix=".jpg", dir=UPLOAD_FOLDER, delete=False)
         temporary_path = Path(temporary.name)
         temporary.close()
@@ -361,10 +388,13 @@ def predict():
         flash("Choose an image before running a screening.", "danger")
         return redirect(url_for("input"))
 
+    request_started = time.perf_counter()
+    app.logger.info("Prediction request accepted")
     filepath = None
     keep_upload = False
     try:
         filepath, relative_path = save_upload(upload)
+        app.logger.info("Upload saved and validated")
         result = yolo_predict(str(filepath))
         with get_db() as connection:
             if using_postgres():
@@ -377,8 +407,13 @@ def predict():
                     "INSERT INTO predictions (user_id, username, image_path, prediction) VALUES (?, ?, ?, ?)",
                     (session["user_id"], session["username"], str(filepath), result),
                 )
+        app.logger.info("Database save completed")
         flash(f"Prediction: {result}", "success")
         keep_upload = True
+        app.logger.info(
+            "Prediction request completed in %.2f seconds",
+            time.perf_counter() - request_started,
+        )
         return render_template("input.html", prediction=result, image_url=relative_path)
     except ValueError as exc:
         flash(str(exc), "warning")

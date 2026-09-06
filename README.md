@@ -6,7 +6,7 @@ AI-assisted X-ray fracture screening with a Flask web interface and one YOLOv8 d
 
 - Python: `3.11.9`
 - Inference: `yolov8_model.pt` only
-- Runtime: CPU-only, one model per worker loaded at startup, image size `512`
+- Runtime: CPU-only, one model per worker loaded at startup, inference size `384`
 - Web server: one Gunicorn worker and one thread
 - Database: PostgreSQL in production or SQLite for local development
 - Health check: `/health`
