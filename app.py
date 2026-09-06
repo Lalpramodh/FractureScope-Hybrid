@@ -158,6 +158,12 @@ def load_yolo_model():
             return _model
         if not MODEL_PATH.is_file():
             raise FileNotFoundError(f"YOLO model not found at {MODEL_PATH}")
+        model_started = time.perf_counter()
+        app.logger.info(
+            "MODEL LOAD START pid=%s path=%s",
+            os.getpid(),
+            MODEL_PATH,
+        )
         detector = YOLO(str(MODEL_PATH))
         detector.to("cpu")
         detector.overrides.update({
@@ -168,13 +174,17 @@ def load_yolo_model():
         })
         detector.fuse()
         _model = detector
-        app.logger.info("YOLO model loaded from %s", MODEL_PATH)
+        app.logger.info(
+            "MODEL LOAD COMPLETE pid=%s elapsed=%.2fs",
+            os.getpid(),
+            time.perf_counter() - model_started,
+        )
         return _model
 
 
 def yolo_predict(filepath):
     prediction_started = time.perf_counter()
-    app.logger.info("Prediction started")
+    app.logger.info("INFERENCE REQUEST START pid=%s", os.getpid())
     detector = load_yolo_model()
     preprocessing_started = time.perf_counter()
     inference_path = prepare_inference_image(filepath)
@@ -185,7 +195,7 @@ def yolo_predict(filepath):
     results = None
     try:
         inference_started = time.perf_counter()
-        app.logger.info("YOLO inference started")
+        app.logger.info("INFERENCE START pid=%s", os.getpid())
         with torch.inference_mode():
             results = detector.predict(
                 source=str(inference_path),
@@ -202,12 +212,14 @@ def yolo_predict(filepath):
                 stream=False,
             )
         app.logger.info(
-            "YOLO inference completed in %.2f seconds",
+            "INFERENCE COMPLETE pid=%s elapsed=%.2fs",
+            os.getpid(),
             time.perf_counter() - inference_started,
         )
         if not results or results[0].boxes is None or len(results[0].boxes) == 0:
             app.logger.info(
-                "Prediction result extracted in %.2f seconds: no detections",
+                "RESULT EXTRACTION COMPLETE pid=%s elapsed=%.2fs no_detections=true",
+                os.getpid(),
                 time.perf_counter() - prediction_started,
             )
             return "No fracture detected"
@@ -220,7 +232,8 @@ def yolo_predict(filepath):
         names = result.names or getattr(detector, "names", {})
         label = names.get(class_id, str(class_id)) if isinstance(names, dict) else str(class_id)
         app.logger.info(
-            "Prediction result extracted in %.2f seconds",
+            "RESULT EXTRACTION COMPLETE pid=%s elapsed=%.2fs",
+            os.getpid(),
             time.perf_counter() - prediction_started,
         )
         return f"{label} ({confidence * 100:.2f}%)"
@@ -389,12 +402,12 @@ def predict():
         return redirect(url_for("input"))
 
     request_started = time.perf_counter()
-    app.logger.info("Prediction request accepted")
+    app.logger.info("PREDICTION REQUEST ACCEPTED pid=%s", os.getpid())
     filepath = None
     keep_upload = False
     try:
         filepath, relative_path = save_upload(upload)
-        app.logger.info("Upload saved and validated")
+        app.logger.info("UPLOAD VALIDATED pid=%s", os.getpid())
         result = yolo_predict(str(filepath))
         with get_db() as connection:
             if using_postgres():
@@ -407,7 +420,7 @@ def predict():
                     "INSERT INTO predictions (user_id, username, image_path, prediction) VALUES (?, ?, ?, ?)",
                     (session["user_id"], session["username"], str(filepath), result),
                 )
-        app.logger.info("Database save completed")
+        app.logger.info("DATABASE SAVE COMPLETE pid=%s", os.getpid())
         flash(f"Prediction: {result}", "success")
         keep_upload = True
         app.logger.info(
@@ -429,8 +442,10 @@ def predict():
 try:
     init_db()
     load_yolo_model()
+    app.logger.info("WORKER READY pid=%s model_loaded=%s", os.getpid(), _model is not None)
 except Exception:
-    app.logger.exception("Startup initialization failed; predictions will be unavailable")
+    app.logger.exception("WORKER STARTUP FAILED pid=%s", os.getpid())
+    raise
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")))
