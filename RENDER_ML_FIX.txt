@@ -1,6 +1,7 @@
-FractureScope Render ML stability fix
-- YOLO is loaded lazily only when /predict is called.
-- Native BLAS/OpenMP threads are limited to 1.
-- OpenCV headless is used.
-- Gunicorn remains single-worker/single-thread.
-- Keep model.pth in the repository through Git LFS.
+FractureScope Render deployment notes
+
+- The application uses yolov8_model.pt as its only inference model.
+- The detector is loaded lazily on the first /predict request.
+- CPU inference uses image size 512, no CUDA, and no half precision.
+- Gunicorn runs one worker and one thread to avoid multiplying model memory.
+- SQLite is created automatically at startup.

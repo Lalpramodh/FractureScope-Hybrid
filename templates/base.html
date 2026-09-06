@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="{{ url_for('static', filename='styles/style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='styles/style.css', v='20260906') }}">
   {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}{% endblock %}">
@@ -75,7 +75,7 @@
     </div>
     <div class="shell footer-bottom"><span>&copy; <span id="displayYear"></span> FractureScope</span><span>Built for careful review</span></div>
   </footer>
-  <script src="{{ url_for('static', filename='scripts/custom.js') }}"></script>
+  <script src="{{ url_for('static', filename='scripts/custom.js', v='20260906') }}"></script>
   {% block scripts %}{% endblock %}
 </body>
 </html>
