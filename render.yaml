@@ -3,13 +3,15 @@ services:
     name: fracturescope
     runtime: python
     buildCommand: pip install --no-cache-dir -r requirements.txt
-    startCommand: gunicorn app:app --workers 1 --threads 1 --timeout 300 --graceful-timeout 30 --max-requests 20 --max-requests-jitter 5
+    startCommand: gunicorn app:app --workers 1 --threads 1 --timeout 120 --graceful-timeout 30 --max-requests 20 --max-requests-jitter 5
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
       - key: SECRET_KEY
         generateValue: true
+      - key: DATABASE_URL
+        sync: false
       - key: OMP_NUM_THREADS
         value: "1"
       - key: MKL_NUM_THREADS

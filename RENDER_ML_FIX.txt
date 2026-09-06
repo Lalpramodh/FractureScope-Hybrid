@@ -1,7 +1,9 @@
 FractureScope Render deployment notes
 
 - The application uses yolov8_model.pt as its only inference model.
-- The detector is loaded lazily on the first /predict request.
+- The detector is loaded once during Gunicorn worker startup, before requests are served.
 - CPU inference uses image size 512, no CUDA, and no half precision.
 - Gunicorn runs one worker and one thread to avoid multiplying model memory.
-- SQLite is created automatically at startup.
+- PostgreSQL is used when DATABASE_URL is set; SQLite is a local-development fallback.
+- Tables are created with CREATE TABLE IF NOT EXISTS and existing SQLite records are preserved.
+- Set SECRET_KEY and DATABASE_URL in Render. Keep one worker because the model is memory-heavy.

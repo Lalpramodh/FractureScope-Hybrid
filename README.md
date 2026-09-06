@@ -16,7 +16,7 @@ AI-assisted X-ray fracture screening with a Flask web interface and one YOLOv8 d
 Render can use `render.yaml` directly. The equivalent start command is:
 
 ```text
-gunicorn app:app --workers 1 --threads 1 --timeout 300 --graceful-timeout 30 --max-requests 20 --max-requests-jitter 5
+gunicorn app:app --workers 1 --threads 1 --timeout 120 --graceful-timeout 30 --max-requests 20 --max-requests-jitter 5
 ```
 
 Set `SECRET_KEY` in the Render environment. `YOLO_MODEL_PATH` is optional and defaults to `yolov8_model.pt` in the project root.
