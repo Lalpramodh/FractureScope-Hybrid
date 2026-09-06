@@ -22,5 +22,7 @@ services:
         value: /tmp/Ultralytics
       - key: SWIN_EXCLUSIVE_MEMORY
         value: "true"
+      - key: SWIN_MEMORY_RESERVE_MB
+        value: "460"
       - key: PYTHONUNBUFFERED
         value: "1"

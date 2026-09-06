@@ -28,8 +28,6 @@ except ImportError:  # PostgreSQL is optional for local SQLite development.
     psycopg2 = None
     RealDictCursor = None
 from ultralytics import YOLO
-import timm
-from timm.data import create_transform
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -80,6 +78,23 @@ SWIN_INPUT_SIZE = 224
 SWIN_CROP_PADDING = float(os.getenv("SWIN_CROP_PADDING", "0.08"))
 SWIN_CLASS_NAMES = [name.strip() for name in os.getenv("SWIN_CLASS_NAMES", "").split(",") if name.strip()]
 SWIN_EXCLUSIVE_MEMORY = os.getenv("SWIN_EXCLUSIVE_MEMORY", "true").lower() == "true"
+SWIN_MEMORY_RESERVE_MB = int(os.getenv("SWIN_MEMORY_RESERVE_MB", "460"))
+
+
+def available_memory_mb():
+    """Return cgroup-aware available memory when running under Render/Linux."""
+    if os.name == "nt":
+        return None
+    try:
+        memory_limit = Path("/sys/fs/cgroup/memory.max").read_text().strip()
+        memory_current = Path("/sys/fs/cgroup/memory.current").read_text().strip()
+        if memory_limit != "max":
+            return (int(memory_limit) - int(memory_current)) / 1048576
+    except (OSError, ValueError):
+        pass
+    if psutil is not None:
+        return psutil.virtual_memory().available / 1048576
+    return None
 
 
 def reclaim_process_memory():
@@ -334,11 +349,19 @@ def load_swin_model():
             raise FileNotFoundError(f"Swin model not found at {SWIN_MODEL_PATH}")
         started = time.perf_counter()
         app.logger.info("Swin lazy loading started path=%s", SWIN_MODEL_PATH)
+        available = available_memory_mb()
+        if available is not None and available < SWIN_MEMORY_RESERVE_MB:
+            raise MemoryError(
+                f"Insufficient memory for Swin classification: {available:.1f} MB available, "
+                f"{SWIN_MEMORY_RESERVE_MB} MB required"
+            )
         if psutil is not None:
             app.logger.info("Memory before Swin load: %.1f MB", psutil.Process().memory_info().rss / 1048576)
         checkpoint = None
         model = None
         try:
+            import timm
+            from timm.data import create_transform
             checkpoint = torch.load(SWIN_MODEL_PATH, map_location="cpu", weights_only=True, mmap=True)
             if not isinstance(checkpoint, dict) or "head.fc.weight" not in checkpoint:
                 raise ValueError("Swin checkpoint is not a supported timm state dict")
