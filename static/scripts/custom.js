@@ -1,46 +1,28 @@
-// to get current year
-function getYear() {
-    var currentDate = new Date();
-    var currentYear = currentDate.getFullYear();
-    document.querySelector("#displayYear").innerHTML = currentYear;
-}
+document.addEventListener('DOMContentLoaded', function () {
+  var year = document.querySelector('#displayYear');
+  if (year) year.textContent = new Date().getFullYear();
 
-getYear();
+  var toggle = document.querySelector('[data-menu-toggle]');
+  var menu = document.querySelector('[data-menu]');
+  if (toggle && menu) {
+    toggle.addEventListener('click', function () {
+      var open = menu.classList.toggle('is-open');
+      toggle.setAttribute('aria-expanded', String(open));
+    });
+  }
 
+  document.querySelectorAll('[data-dismiss]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var flash = button.closest('.flash');
+      if (flash) flash.remove();
+    });
+  });
 
-// client section owl carousel
-$(".client_owl-carousel").owlCarousel({
-    loop: true,
-    margin: 0,
-    dots: false,
-    nav: true,
-    navText: [],
-    autoplay: true,
-    autoplayHoverPause: true,
-    navText: [
-        '<i class="fa fa-angle-left" aria-hidden="true"></i>',
-        '<i class="fa fa-angle-right" aria-hidden="true"></i>'
-    ],
-    responsive: {
-        0: {
-            items: 1
-        },
-        600: {
-            items: 1
-        },
-        1000: {
-            items: 2
-        }
-    }
+  var fileInput = document.querySelector('[data-file-input]');
+  var fileName = document.querySelector('[data-file-name]');
+  if (fileInput && fileName) {
+    fileInput.addEventListener('change', function () {
+      fileName.textContent = fileInput.files.length ? fileInput.files[0].name : 'PNG, JPG or JPEG up to 16 MB';
+    });
+  }
 });
-
-
-
-/** google_map js **/
-function myMap() {
-    var mapProp = {
-        center: new google.maps.LatLng(40.712775, -74.005973),
-        zoom: 18,
-    };
-    var map = new google.maps.Map(document.getElementById("googleMap"), mapProp);
-}
