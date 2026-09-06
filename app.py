@@ -3,6 +3,8 @@ import sqlite3
 import threading
 import logging
 import re
+import gc
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
@@ -159,6 +161,7 @@ def load_yolo_model():
             "half": False,
             "verbose": False,
         })
+        detector.fuse()
         _model = detector
         app.logger.info("YOLO model loaded from %s", MODEL_PATH)
         return _model
@@ -166,28 +169,41 @@ def load_yolo_model():
 
 def yolo_predict(filepath):
     detector = load_yolo_model()
-    with torch.inference_mode():
-        results = detector.predict(
-            source=filepath,
-            device="cpu",
-            imgsz=512,
-            conf=0.25,
-            iou=0.45,
-            half=False,
-            max_det=20,
-            verbose=False,
-        )
-    if not results or results[0].boxes is None or len(results[0].boxes) == 0:
-        return "No fracture detected"
+    inference_path = prepare_inference_image(filepath)
+    results = None
+    try:
+        with torch.inference_mode():
+            results = detector.predict(
+                source=str(inference_path),
+                device="cpu",
+                imgsz=512,
+                batch=1,
+                conf=0.25,
+                iou=0.45,
+                half=False,
+                max_det=20,
+                verbose=False,
+                save=False,
+                show=False,
+                stream=False,
+            )
+        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
+            return "No fracture detected"
 
-    result = results[0]
-    boxes = result.boxes
-    best_index = int(boxes.conf.argmax().item())
-    class_id = int(boxes.cls[best_index].item())
-    confidence = float(boxes.conf[best_index].item())
-    names = result.names or getattr(detector, "names", {})
-    label = names.get(class_id, str(class_id)) if isinstance(names, dict) else str(class_id)
-    return f"{label} ({confidence * 100:.2f}%)"
+        result = results[0]
+        boxes = result.boxes
+        best_index = int(boxes.conf.argmax().item())
+        class_id = int(boxes.cls[best_index].item())
+        confidence = float(boxes.conf[best_index].item())
+        names = result.names or getattr(detector, "names", {})
+        label = names.get(class_id, str(class_id)) if isinstance(names, dict) else str(class_id)
+        return f"{label} ({confidence * 100:.2f}%)"
+    finally:
+        if results:
+            del results
+        if inference_path != Path(filepath):
+            inference_path.unlink(missing_ok=True)
+        gc.collect()
 
 
 def allowed_file(filename):
@@ -208,6 +224,22 @@ def save_upload(upload):
     filepath = UPLOAD_FOLDER / filename
     upload.save(filepath)
     return filepath, f"uploads/{filename}"
+
+
+def prepare_inference_image(filepath):
+    """Bound inference memory for unusually large uploads while retaining the original."""
+    source = Path(filepath)
+    with Image.open(source) as image:
+        image.verify()
+    with Image.open(source) as image:
+        if max(image.size) <= 2048:
+            return source
+        image.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+        temporary = tempfile.NamedTemporaryFile(suffix=".jpg", dir=UPLOAD_FOLDER, delete=False)
+        temporary_path = Path(temporary.name)
+        temporary.close()
+        image.convert("RGB").save(temporary_path, format="JPEG", quality=95)
+        return temporary_path
 
 
 @app.route("/health")

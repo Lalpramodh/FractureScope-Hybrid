@@ -6,9 +6,9 @@ AI-assisted X-ray fracture screening with a Flask web interface and one YOLOv8 d
 
 - Python: `3.11.9`
 - Inference: `yolov8_model.pt` only
-- Runtime: CPU-only, lazy model loading, image size `512`
+- Runtime: CPU-only, one model per worker loaded at startup, image size `512`
 - Web server: one Gunicorn worker and one thread
-- Database: SQLite, initialized automatically at startup
+- Database: PostgreSQL in production or SQLite for local development
 - Health check: `/health`
 
 ## Render
@@ -16,10 +16,10 @@ AI-assisted X-ray fracture screening with a Flask web interface and one YOLOv8 d
 Render can use `render.yaml` directly. The equivalent start command is:
 
 ```text
-gunicorn app:app --workers 1 --threads 1 --timeout 120 --graceful-timeout 30 --max-requests 20 --max-requests-jitter 5
+gunicorn app:app --workers 1 --threads 1 --timeout 180 --graceful-timeout 30 --max-requests 20 --max-requests-jitter 5
 ```
 
-Set `SECRET_KEY` in the Render environment. `YOLO_MODEL_PATH` is optional and defaults to `yolov8_model.pt` in the project root.
+Set `SECRET_KEY` and `DATABASE_URL` in the Render environment. `YOLO_MODEL_PATH` is optional and defaults to `yolov8_model.pt` in the project root.
 
 ## Local verification
 
@@ -28,4 +28,4 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Then open `http://localhost:5000/health` and confirm the response reports `status: ok` and `model: YOLO-only`. The detector is not loaded until an authenticated request is sent to `/predict`.
+Then open `http://localhost:5000/health` and confirm the response reports `status: healthy`. The detector is loaded once during worker startup and reused for authenticated `/predict` requests.
