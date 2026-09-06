@@ -2,6 +2,8 @@ Flask==3.1.1
 gunicorn==23.0.0
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+timm==1.0.19
 ultralytics==8.3.170
 Pillow==11.3.0
 psycopg2-binary==2.9.10

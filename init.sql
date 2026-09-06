@@ -13,5 +13,7 @@ CREATE TABLE predictions (
     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     image_path TEXT NOT NULL,
     prediction TEXT NOT NULL,
+    hybrid_result TEXT,
+    annotated_image_path TEXT,
     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

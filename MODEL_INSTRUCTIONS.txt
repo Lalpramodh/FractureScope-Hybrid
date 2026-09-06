@@ -1,3 +1,7 @@
 FractureScope model contract
 
-The only supported inference model is yolov8_model.pt. Keep this file in the project root or set YOLO_MODEL_PATH to an alternative YOLO weights path. Each Gunicorn worker loads one model during application startup and reuses it for CPU inference.
+YOLOv8 remains the detector. Keep yolov8_model.pt in the project root or set YOLO_MODEL_PATH to an alternative detector path. Each Gunicorn worker loads one detector during startup and reuses it for CPU inference.
+
+The hybrid classifier is model.pth. It is a raw timm Swin-Base state dict matching swin_base_patch4_window7_224 with four output logits. Keep it in the project root or set SWIN_MODEL_PATH. Because the checkpoint has no class-name metadata, set SWIN_CLASS_NAMES only from the original training record, as four comma-separated labels. Otherwise the application deliberately displays Checkpoint class 0 through Checkpoint class 3.
+
+The classifier receives each YOLO bounding-box crop with configurable padding (SWIN_CROP_PADDING, default 0.08), resized/cropped to 224 with ImageNet normalization. Both models use CPU inference, eval mode, inference_mode, and one cached instance per worker.

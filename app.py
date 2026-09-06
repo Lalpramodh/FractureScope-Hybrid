@@ -4,6 +4,7 @@ import threading
 import logging
 import re
 import gc
+import json
 import tempfile
 import time
 from contextlib import contextmanager
@@ -17,7 +18,7 @@ os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
 
 import torch
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageDraw, UnidentifiedImageError
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
 try:
@@ -27,6 +28,8 @@ except ImportError:  # PostgreSQL is optional for local SQLite development.
     psycopg2 = None
     RealDictCursor = None
 from ultralytics import YOLO
+import timm
+from timm.data import create_transform
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -40,6 +43,7 @@ except RuntimeError:
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = Path(os.getenv("YOLO_MODEL_PATH", BASE_DIR / "yolov8_model.pt"))
+SWIN_MODEL_PATH = Path(os.getenv("SWIN_MODEL_PATH", BASE_DIR / "model.pth"))
 DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "fracturescope.db"))
 UPLOAD_FOLDER = BASE_DIR / "static" / "uploads"
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png"}
@@ -62,8 +66,14 @@ if not os.getenv("DATABASE_URL"):
 
 _model = None
 _model_lock = threading.Lock()
+_swin_model = None
+_swin_transform = None
+_swin_lock = threading.Lock()
 INFERENCE_SIZE = 384
 MAX_INFERENCE_DIMENSION = 2048
+SWIN_INPUT_SIZE = 224
+SWIN_CROP_PADDING = float(os.getenv("SWIN_CROP_PADDING", "0.08"))
+SWIN_CLASS_NAMES = [name.strip() for name in os.getenv("SWIN_CLASS_NAMES", "").split(",") if name.strip()]
 
 
 def using_postgres():
@@ -120,8 +130,12 @@ def init_db():
                     user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
                     image_path TEXT NOT NULL,
                     prediction TEXT NOT NULL,
+                    hybrid_result TEXT,
+                    annotated_image_path TEXT,
                     timestamp TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
                 );
+                ALTER TABLE predictions ADD COLUMN IF NOT EXISTS hybrid_result TEXT;
+                ALTER TABLE predictions ADD COLUMN IF NOT EXISTS annotated_image_path TEXT;
             """)
         else:
             connection.executescript("""
@@ -138,6 +152,8 @@ def init_db():
                     username TEXT,
                     image_path TEXT NOT NULL,
                     prediction TEXT NOT NULL,
+                    hybrid_result TEXT,
+                    annotated_image_path TEXT,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
                 );
             """)
@@ -146,6 +162,10 @@ def init_db():
                 connection.execute("ALTER TABLE predictions ADD COLUMN user_id INTEGER")
             if "username" not in columns:
                 connection.execute("ALTER TABLE predictions ADD COLUMN username TEXT")
+            if "hybrid_result" not in columns:
+                connection.execute("ALTER TABLE predictions ADD COLUMN hybrid_result TEXT")
+            if "annotated_image_path" not in columns:
+                connection.execute("ALTER TABLE predictions ADD COLUMN annotated_image_path TEXT")
             connection.execute("""
                 UPDATE predictions SET user_id = (
                     SELECT id FROM users WHERE users.username = predictions.username
@@ -246,32 +266,148 @@ def yolo_predict(filepath):
             os.getpid(),
             time.perf_counter() - inference_started,
         )
-        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
-            app.logger.info(
-                "RESULT EXTRACTION COMPLETE pid=%s elapsed=%.2fs no_detections=true",
-                os.getpid(),
-                time.perf_counter() - prediction_started,
-            )
-            return "No fracture detected"
-
-        result = results[0]
-        boxes = result.boxes
-        best_index = int(boxes.conf.argmax().item())
-        class_id = int(boxes.cls[best_index].item())
-        confidence = float(boxes.conf[best_index].item())
-        names = result.names or getattr(detector, "names", {})
-        label = names.get(class_id, str(class_id)) if isinstance(names, dict) else str(class_id)
-        app.logger.info(
-            "RESULT EXTRACTION COMPLETE pid=%s elapsed=%.2fs",
-            os.getpid(),
-            time.perf_counter() - prediction_started,
-        )
-        return f"{label} ({confidence * 100:.2f}%)"
+        return results[0] if results else None
     finally:
         if results:
             del results
         if inference_path != Path(filepath):
             inference_path.unlink(missing_ok=True)
+        gc.collect()
+
+
+def load_swin_model():
+    """Load the timm Swin-Base checkpoint once for this worker."""
+    global _swin_model, _swin_transform
+    if _swin_model is not None:
+        return _swin_model, _swin_transform
+    with _swin_lock:
+        if _swin_model is not None:
+            return _swin_model, _swin_transform
+        if not SWIN_MODEL_PATH.is_file():
+            raise FileNotFoundError(f"Swin model not found at {SWIN_MODEL_PATH}")
+        started = time.perf_counter()
+        app.logger.info("Loading Swin Transformer from %s", SWIN_MODEL_PATH)
+        checkpoint = torch.load(SWIN_MODEL_PATH, map_location="cpu", weights_only=True)
+        if not isinstance(checkpoint, dict) or "head.fc.weight" not in checkpoint:
+            raise ValueError("Swin checkpoint is not a supported timm state dict")
+        class_count = int(checkpoint["head.fc.weight"].shape[0])
+        if len(SWIN_CLASS_NAMES) not in (0, class_count):
+            raise ValueError(f"SWIN_CLASS_NAMES must contain exactly {class_count} labels")
+        model = timm.create_model(
+            "swin_base_patch4_window7_224",
+            pretrained=False,
+            num_classes=class_count,
+        )
+        model.load_state_dict(checkpoint, strict=True)
+        model.to("cpu").eval()
+        _swin_transform = create_transform(
+            input_size=(3, SWIN_INPUT_SIZE, SWIN_INPUT_SIZE),
+            is_training=False,
+            mean=(0.485, 0.456, 0.406),
+            std=(0.229, 0.224, 0.225),
+            interpolation="bicubic",
+        )
+        _swin_model = model
+        labels = SWIN_CLASS_NAMES or [f"Checkpoint class {index}" for index in range(class_count)]
+        app.logger.info(
+            "Swin Transformer loaded in %.2fs architecture=swin_base_patch4_window7_224 classes=%s labels=%s",
+            time.perf_counter() - started,
+            class_count,
+            labels,
+        )
+        return _swin_model, _swin_transform
+
+
+def classify_fracture(crop):
+    model, transform = load_swin_model()
+    tensor = transform(crop.convert("RGB")).unsqueeze(0)
+    try:
+        with torch.inference_mode():
+            probabilities = torch.softmax(model(tensor), dim=1)[0]
+            class_id = int(probabilities.argmax().item())
+            confidence = float(probabilities[class_id].item())
+        labels = SWIN_CLASS_NAMES or [f"Checkpoint class {index}" for index in range(len(probabilities))]
+        return labels[class_id], confidence
+    finally:
+        del tensor
+        gc.collect()
+
+
+def _padded_box(box, width, height):
+    x1, y1, x2, y2 = box
+    padding_x = (x2 - x1) * SWIN_CROP_PADDING
+    padding_y = (y2 - y1) * SWIN_CROP_PADDING
+    return (
+        max(0, int(x1 - padding_x)),
+        max(0, int(y1 - padding_y)),
+        min(width, int(x2 + padding_x)),
+        min(height, int(y2 + padding_y)),
+    )
+
+
+def _annotate_image(filepath, detections):
+    annotated_name = f"annotated_{Path(filepath).name}"
+    annotated_path = UPLOAD_FOLDER / annotated_name
+    with Image.open(filepath) as source:
+        image = source.convert("RGB")
+        draw = ImageDraw.Draw(image)
+        for index, detection in enumerate(detections, start=1):
+            x1, y1, x2, y2 = detection["bbox"]
+            label = f"#{index} YOLO {detection['yolo_confidence'] * 100:.1f}% | {detection['swin_class']} {detection['swin_confidence'] * 100:.1f}%" if detection["swin_confidence"] is not None else f"#{index} YOLO {detection['yolo_confidence'] * 100:.1f}% | {detection['swin_class']}"
+            draw.rectangle((x1, y1, x2, y2), outline="#45c69c", width=max(3, image.width // 350))
+            text_box = draw.textbbox((x1, y1), label)
+            text_height = text_box[3] - text_box[1]
+            text_y = max(0, y1 - text_height - 8)
+            draw.rectangle((x1, text_y, x1 + (text_box[2] - text_box[0]) + 10, y1), fill="#10242b")
+            draw.text((x1 + 5, text_y + 3), label, fill="#82e3c0")
+        image.save(annotated_path, format="JPEG", quality=92)
+    return annotated_path
+
+
+def run_hybrid_prediction(filepath):
+    started = time.perf_counter()
+    app.logger.info("Hybrid prediction started")
+    results = yolo_predict(filepath)
+    if results is None or results.boxes is None or len(results.boxes) == 0:
+        return {"detections": [], "summary": "No fracture detected"}, None
+    with Image.open(filepath) as original:
+        original_image = original.convert("RGB")
+        original_width, original_height = original_image.size
+    inference_path = prepare_inference_image(filepath)
+    try:
+        with Image.open(inference_path) as inference_image:
+            inference_width, inference_height = inference_image.size
+        names = results.names or getattr(load_yolo_model(), "names", {})
+        detections = []
+        for index in range(len(results.boxes)):
+            raw_box = results.boxes.xyxy[index].tolist()
+            scale_x = original_width / inference_width
+            scale_y = original_height / inference_height
+            bbox = [round(raw_box[0] * scale_x), round(raw_box[1] * scale_y), round(raw_box[2] * scale_x), round(raw_box[3] * scale_y)]
+            crop_box = _padded_box(bbox, original_width, original_height)
+            crop = original_image.crop(crop_box)
+            try:
+                swin_class, swin_confidence = classify_fracture(crop)
+            except Exception:
+                app.logger.exception("Swin classification failed for region %s", index + 1)
+                swin_class, swin_confidence = "Classification unavailable", None
+            class_id = int(results.boxes.cls[index].item())
+            yolo_label = names.get(class_id, str(class_id)) if isinstance(names, dict) else str(class_id)
+            detections.append({
+                "bbox": bbox,
+                "yolo_class": yolo_label,
+                "yolo_confidence": float(results.boxes.conf[index].item()),
+                "swin_class": swin_class,
+                "swin_confidence": swin_confidence,
+            })
+        annotated_path = _annotate_image(filepath, detections)
+        result = {"detections": detections, "summary": f"{len(detections)} fracture region(s) detected"}
+        app.logger.info("Hybrid prediction completed in %.2fs", time.perf_counter() - started)
+        return result, annotated_path
+    finally:
+        if inference_path != Path(filepath):
+            inference_path.unlink(missing_ok=True)
+        del results
         gc.collect()
 
 
@@ -411,10 +547,24 @@ def profile():
     username = session["username"]
     with get_db() as connection:
         rows = execute(connection,
-            "SELECT prediction, timestamp FROM predictions WHERE user_id = ? ORDER BY timestamp DESC",
+            "SELECT prediction, hybrid_result, timestamp FROM predictions WHERE user_id = ? ORDER BY timestamp DESC",
             (session["user_id"],),
         ).fetchall()
-    history = [{"date": str(r["timestamp"])[:10], "time": str(r["timestamp"])[11:19], "name": username, "result": r["prediction"]} for r in rows]
+    history = []
+    for row in rows:
+        hybrid = None
+        if row["hybrid_result"]:
+            try:
+                hybrid = json.loads(row["hybrid_result"])
+            except (TypeError, json.JSONDecodeError):
+                app.logger.warning("Ignoring malformed hybrid history record")
+        history.append({
+            "date": str(row["timestamp"])[:10],
+            "time": str(row["timestamp"])[11:19],
+            "name": username,
+            "result": row["prediction"],
+            "hybrid": hybrid,
+        })
     return render_template("profile.html", history=history)
 
 @app.route("/input", methods=["GET", "POST"])
@@ -438,26 +588,28 @@ def predict():
     try:
         filepath, relative_path = save_upload(upload)
         app.logger.info("UPLOAD VALIDATED pid=%s", os.getpid())
-        result = yolo_predict(str(filepath))
+        hybrid_result, annotated_path = run_hybrid_prediction(str(filepath))
+        result = hybrid_result["summary"]
         with get_db() as connection:
             if using_postgres():
                 execute(connection,
-                    "INSERT INTO predictions (user_id, image_path, prediction) VALUES (?, ?, ?)",
-                    (session["user_id"], str(filepath), result),
+                    "INSERT INTO predictions (user_id, image_path, prediction, hybrid_result, annotated_image_path) VALUES (?, ?, ?, ?, ?)",
+                    (session["user_id"], str(filepath), result, json.dumps(hybrid_result), str(annotated_path) if annotated_path else None),
                 )
             else:
                 execute(connection,
-                    "INSERT INTO predictions (user_id, username, image_path, prediction) VALUES (?, ?, ?, ?)",
-                    (session["user_id"], session["username"], str(filepath), result),
+                    "INSERT INTO predictions (user_id, username, image_path, prediction, hybrid_result, annotated_image_path) VALUES (?, ?, ?, ?, ?, ?)",
+                    (session["user_id"], session["username"], str(filepath), result, json.dumps(hybrid_result), str(annotated_path) if annotated_path else None),
                 )
         app.logger.info("DATABASE SAVE COMPLETE pid=%s", os.getpid())
-        flash(f"Prediction: {result}", "success")
+        flash(f"Hybrid analysis: {result}", "success")
         keep_upload = True
         app.logger.info(
             "Prediction request completed in %.2f seconds",
             time.perf_counter() - request_started,
         )
-        return render_template("input.html", prediction=result, image_url=relative_path)
+        display_path = f"uploads/{Path(annotated_path).name}" if annotated_path else relative_path
+        return render_template("input.html", prediction=result, image_url=display_path, hybrid_result=hybrid_result)
     except ValueError as exc:
         flash(str(exc), "warning")
         return redirect(url_for("input"))
@@ -472,6 +624,10 @@ def predict():
 try:
     init_db()
     load_yolo_model()
+    try:
+        load_swin_model()
+    except Exception:
+        app.logger.exception("SWIN STARTUP FAILED; continuing with YOLO detection")
     app.logger.info("WORKER READY pid=%s model_loaded=%s", os.getpid(), _model is not None)
 except Exception:
     app.logger.exception("WORKER STARTUP FAILED pid=%s", os.getpid())

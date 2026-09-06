@@ -7,7 +7,7 @@
     <div class="hero-copy">
       <span class="eyebrow">AI-assisted screening workspace</span>
       <h1 class="display">A clearer view of every scan.</h1>
-      <p>Welcome back, {{ username }}. Upload an X-ray to screen for fracture indicators and keep every review in one focused workspace.</p>
+      <p>Welcome back, {{ username }}. FractureScope combines YOLOv8 localization with Swin Transformer classification for a focused X-ray review.</p>
       <div class="hero-actions"><a class="button" href="{{ url_for('input') }}">Start a new scan <span aria-hidden="true">&#8594;</span></a><a class="button button-ghost" href="{{ url_for('analysis') }}">Explore the guide</a></div>
     </div>
     <div class="hero-visual" aria-label="X-ray scan visual">
@@ -17,10 +17,10 @@
 </section>
 <section class="section">
   <div class="shell"><div class="section-heading"><div><span class="eyebrow">Built for review</span><h2>From image to insight.</h2></div><p>FractureScope keeps the workflow simple: submit an image, review the model output, and use clinical judgment for the next step.</p></div>
-    <div class="card-grid">
-      <article class="feature-card"><div class="feature-icon">01</div><h3>Upload securely</h3><p>Bring a clear X-ray into a private, purpose-built screening flow.</p></article>
-      <article class="feature-card"><div class="feature-icon">02</div><h3>Read the signal</h3><p>See the model's predicted region and confidence in a legible result view.</p></article>
-      <article class="feature-card"><div class="feature-icon">03</div><h3>Keep context</h3><p>Return to your personal history whenever you need to compare past scans.</p></article>
+    <div class="hybrid-intro"><span class="eyebrow">Hybrid AI-powered fracture analysis</span><h2>From location to pattern.</h2><p>YOLOv8 detects and localizes suspected fracture regions. Each detected crop is then classified by the Swin Transformer. Together, the pipeline provides localization and classification in one analysis workflow.</p></div><div class="card-grid">
+      <article class="feature-card"><div class="feature-icon">01</div><h3>YOLOv8 Detection</h3><p>Finds suspected fracture regions and supplies bounding boxes plus detection confidence.</p></article>
+      <article class="feature-card"><div class="feature-icon">02</div><h3>Swin Classification</h3><p>Analyzes each localized crop and returns the checkpoint's fracture class and confidence.</p></article>
+      <article class="feature-card"><div class="feature-icon">03</div><h3>Hybrid AI Analysis</h3><p>Review annotated regions and retain each analysis in your account history.</p></article>
     </div>
   </div>
 </section>
