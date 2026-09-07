@@ -4,4 +4,4 @@ YOLOv8 remains the detector source model. Keep yolov8_model.pt for development/e
 
 Render inference uses OpenCV-compatible rectangular stride-aligned letterbox preprocessing with a 320px target, confidence 0.25, class-aware NMS at IoU 0.45, and max_det=10. The ONNX session is sequential, single-threaded, has no warmup, and the health endpoint does not load it.
 
-Groq is used only as an optional text chatbot available through the small assistant launcher on every page. GROQ_API_KEY is read only from the environment and GROQ_CHAT_MODEL is configurable. Use requirements-export.txt only for development export/comparison; it is not a production dependency file.
+No external language or vision API is used in production. Use requirements-export.txt only for development export/comparison; it is not a production dependency file.

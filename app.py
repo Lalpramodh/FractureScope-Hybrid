@@ -25,7 +25,6 @@ try:
 except ImportError:  # PostgreSQL is optional for local SQLite development.
     psycopg2 = None
     RealDictCursor = None
-from groq import Groq, RateLimitError
 from onnx_yolo import predict as onnx_predict, session_loaded as onnx_session_loaded
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -40,8 +39,6 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "fracturescope.db"))
 UPLOAD_FOLDER = BASE_DIR / "static" / "uploads"
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
-GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.1-8b-instant")
-GROQ_CHAT_MAX_TOKENS = max(128, int(os.getenv("GROQ_CHAT_MAX_TOKENS", "300")))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY")
@@ -60,7 +57,6 @@ if not os.getenv("DATABASE_URL"):
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _inference_lock = threading.Lock()
-_groq_client = None
 
 
 def available_memory_mb():
@@ -236,33 +232,6 @@ def _annotate_image(filepath, detections):
     return annotated_path
 
 
-def _groq_client_instance():
-    global _groq_client
-    if _groq_client is None and os.getenv("GROQ_API_KEY"):
-        _groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
-    return _groq_client
-
-
-def chat_with_groq(messages):
-    client = _groq_client_instance()
-    if client is None:
-        return "Chat is unavailable because GROQ_API_KEY is not configured."
-    try:
-        response = client.chat.completions.create(
-            model=GROQ_CHAT_MODEL,
-            temperature=0,
-            max_tokens=GROQ_CHAT_MAX_TOKENS,
-            messages=messages,
-        )
-        return response.choices[0].message.content.strip()
-    except RateLimitError as exc:
-        app.logger.warning("GROQ CHAT RATE LIMIT message=%s", str(exc)[:240])
-        return "Chat is temporarily unavailable because the Groq request limit was reached."
-    except Exception:
-        app.logger.exception("GROQ CHAT FAILED")
-        return "Chat is temporarily unavailable. Please try again later."
-
-
 def _run_yolo_prediction(filepath):
     started = time.perf_counter()
     app.logger.info("YOLO prediction started")
@@ -330,41 +299,10 @@ def health():
     return {
         "status": "healthy",
         "yolo_loaded": onnx_session_loaded(),
-        "groq_configured": bool(os.getenv("GROQ_API_KEY")),
         "database_configured": using_postgres() or DB_PATH.is_file(),
         "available_memory_mb": available_memory_mb(),
         "process_id": os.getpid(),
     }, 200
-
-
-@app.route("/chat", methods=["POST"])
-def chat():
-    payload = request.get_json(silent=True) or {}
-    incoming = payload.get("messages", [])
-    if not isinstance(incoming, list):
-        return {"reply": "Please send a valid chat message."}, 400
-    messages = []
-    for item in incoming[-10:]:
-        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
-            continue
-        content = str(item.get("content", "")).strip()
-        if content:
-            messages.append({"role": item["role"], "content": content[:1200]})
-    if not messages or messages[-1]["role"] != "user":
-        return {"reply": "Please enter a question first."}, 400
-    system_message = {
-        "role": "system",
-        "content": (
-            "You are FractureScope's helpful health-information assistant. Be concise and clear. "
-            "You may explain X-rays, fracture terminology, the app workflow, and general safety guidance. "
-            "Do not diagnose, confirm a fracture, interpret an individual image, infer patient details, "
-            "or replace a radiologist or healthcare professional. For urgent symptoms, advise professional care."
-        ),
-    }
-    started = time.perf_counter()
-    reply = chat_with_groq([system_message, *messages])
-    app.logger.info("GROQ CHAT COMPLETE elapsed=%.2fs", time.perf_counter() - started)
-    return {"reply": reply}, 200
 
 
 @app.errorhandler(413)
@@ -538,10 +476,9 @@ def predict():
 try:
     init_db()
     app.logger.info(
-        "WORKER READY pid=%s onnx_session_loaded=%s groq_configured=%s",
+        "WORKER READY pid=%s onnx_session_loaded=%s",
         os.getpid(),
         onnx_session_loaded(),
-        bool(os.getenv("GROQ_API_KEY")),
     )
 except Exception:
     app.logger.exception("WORKER STARTUP FAILED pid=%s", os.getpid())

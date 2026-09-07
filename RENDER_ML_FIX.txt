@@ -5,7 +5,6 @@ FractureScope Render deployment notes
 - CPU inference uses OpenCV-compatible rectangular stride-aligned letterbox preprocessing, target size 320, confidence 0.25, IoU 0.45, and max_det 10.
 - The runtime has one sequential ONNX CPU thread configuration and no model warmup.
 - Gunicorn runs one worker and one thread: gunicorn app:app --workers 1 --threads 1 --timeout 300
-- Groq is not part of the prediction path; it is used only by the optional text chatbot.
 - PostgreSQL is used when DATABASE_URL is set; SQLite is a local-development fallback.
 - Tables are created with CREATE TABLE IF NOT EXISTS and existing records are preserved.
-- Set SECRET_KEY, DATABASE_URL, and GROQ_API_KEY in Render. GROQ_CHAT_MODEL is configurable.
+- Set SECRET_KEY and DATABASE_URL in Render.

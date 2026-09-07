@@ -20,11 +20,5 @@ services:
         value: "1"
       - key: YOLO_CONFIG_DIR
         value: /tmp/Ultralytics
-      - key: GROQ_API_KEY
-        sync: false
-      - key: GROQ_CHAT_MODEL
-        value: llama-3.1-8b-instant
-      - key: GROQ_CHAT_MAX_TOKENS
-        value: "300"
       - key: PYTHONUNBUFFERED
         value: "1"
