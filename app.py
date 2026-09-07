@@ -27,7 +27,7 @@ try:
 except ImportError:  # PostgreSQL is optional for local SQLite development.
     psycopg2 = None
     RealDictCursor = None
-from groq import Groq
+from groq import Groq, RateLimitError
 from onnx_yolo import predict as onnx_predict, session_loaded as onnx_session_loaded
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
@@ -44,6 +44,7 @@ UPLOAD_FOLDER = BASE_DIR / "static" / "uploads"
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
 GROQ_MAX_REGIONS = max(1, int(os.getenv("GROQ_MAX_REGIONS", "3")))
+GROQ_MAX_OUTPUT_TOKENS = max(256, int(os.getenv("GROQ_MAX_OUTPUT_TOKENS", "600")))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY")
@@ -298,17 +299,19 @@ def analyze_crop_with_groq(crop, region_number):
         encoded = base64.b64encode(buffer.read()).decode("ascii")
         prompt = (
             "You are reviewing region %d of an X-ray image. YOLOv8 has already localized a possible fracture region. "
-            "Visually describe only what can reasonably be observed in this crop. Return JSON only with exactly these "
+            "Visually describe only what can reasonably be observed in this crop. Be concise. Return JSON only with exactly these "
             "fields: possible_fracture_type, confidence_level, description, observations, limitations, recommendation. "
             "possible_fracture_type must be a possible pattern, not a diagnosis, using one of Transverse, Oblique, "
             "Spiral, Comminuted, Greenstick, Impacted, Avulsion, Hairline / subtle, Other, or Unable to determine. "
             "Do not infer patient information or medical history. State Unable to determine when image quality or pattern "
-            "is insufficient. Never claim a confirmed diagnosis. observations must be an array of strings."
+            "is insufficient. Never claim a confirmed diagnosis. observations must be an array of at most 3 short strings. "
+            "Keep every text field brief and keep the complete JSON response under 450 tokens."
         ) % region_number
         app.logger.info("GROQ ANALYSIS START region=%s model=%s", region_number, GROQ_VISION_MODEL)
         response = client.chat.completions.create(
             model=GROQ_VISION_MODEL,
             temperature=0,
+            max_tokens=GROQ_MAX_OUTPUT_TOKENS,
             response_format={"type": "json_object"},
             messages=[{"role": "user", "content": [
                 {"type": "text", "text": prompt},
@@ -329,6 +332,9 @@ def analyze_crop_with_groq(crop, region_number):
             "limitations": str(payload.get("limitations") or "No limitations were provided."),
             "recommendation": str(payload.get("recommendation") or "Seek professional review."),
         }
+    except RateLimitError as exc:
+        app.logger.warning("GROQ RATE LIMIT region=%s message=%s", region_number, str(exc)[:240])
+        return _fallback_analysis("Groq analysis is temporarily unavailable because the model token limit was reached.")
     except Exception:
         app.logger.exception("GROQ ANALYSIS FAILED region=%s", region_number)
         return _fallback_analysis("Analysis temporarily unavailable.")

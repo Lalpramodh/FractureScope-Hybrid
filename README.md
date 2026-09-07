@@ -27,10 +27,11 @@ Set `SECRET_KEY`, `DATABASE_URL`, and `GROQ_API_KEY` in the Render environment. 
 SECRET_KEY=your-secret-key
 GROQ_API_KEY=your-groq-api-key
 GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+GROQ_MAX_OUTPUT_TOKENS=600
 DATABASE_URL=your-postgresql-url
 ```
 
-Never commit real values. When `GROQ_API_KEY` is absent or the API fails, YOLO results are still saved and displayed with an unavailable-analysis message. Images with no YOLO detections do not call Groq.
+Never commit real values. `GROQ_MAX_OUTPUT_TOKENS` keeps structured responses below low-tier Groq output-token limits. When `GROQ_API_KEY` is absent or the API fails, YOLO results are still saved and displayed with an unavailable-analysis message. Images with no YOLO detections do not call Groq.
 
 ## Local verification
 
