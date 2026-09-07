@@ -1,0 +1,7 @@
+# Development-only dependencies for exporting the unchanged .pt checkpoint.
+-r requirements.txt
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+ultralytics==8.3.170
+onnx==1.17.0

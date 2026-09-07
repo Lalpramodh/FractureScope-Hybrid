@@ -6,7 +6,6 @@ import re
 import gc
 import json
 import base64
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -18,7 +17,6 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("YOLO_CONFIG_DIR", "/tmp/Ultralytics")
 
-import torch
 from PIL import Image, ImageDraw, UnidentifiedImageError
 from flask import Flask, flash, redirect, render_template, request, session, url_for
 
@@ -28,8 +26,8 @@ try:
 except ImportError:  # PostgreSQL is optional for local SQLite development.
     psycopg2 = None
     RealDictCursor = None
-from ultralytics import YOLO
 from groq import Groq
+from onnx_yolo import predict as onnx_predict, session_loaded as onnx_session_loaded
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -39,15 +37,7 @@ except ImportError:  # Optional; Render diagnostics still work without it.
     psutil = None
 
 Image.MAX_IMAGE_PIXELS = 50_000_000
-torch.set_num_threads(1)
-try:
-    torch.set_num_interop_threads(1)
-except RuntimeError:
-    # Torch inter-op threads can only be configured before parallel work starts.
-    pass
-
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = Path(os.getenv("YOLO_MODEL_PATH", BASE_DIR / "yolov8_model.pt"))
 DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "fracturescope.db"))
 UPLOAD_FOLDER = BASE_DIR / "static" / "uploads"
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
@@ -70,11 +60,8 @@ UPLOAD_FOLDER.mkdir(parents=True, exist_ok=True)
 if not os.getenv("DATABASE_URL"):
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-_model = None
-_model_lock = threading.Lock()
 _inference_lock = threading.Lock()
 _groq_client = None
-INFERENCE_SIZE = 320
 GROQ_CROP_PADDING = float(os.getenv("GROQ_CROP_PADDING", "0.08"))
 
 
@@ -202,102 +189,33 @@ def init_db():
     app.logger.info("Database initialized using %s", "PostgreSQL" if using_postgres() else "SQLite")
 
 
-def load_yolo_model():
-    """Load and configure one CPU detector for the lifetime of this worker."""
-    global _model
-    if _model is not None:
-        return _model
-    with _model_lock:
-        if _model is not None:
-            return _model
-        if not MODEL_PATH.is_file():
-            raise FileNotFoundError(f"YOLO model not found at {MODEL_PATH}")
-        model_started = time.perf_counter()
-        app.logger.info(
-            "YOLO LOAD START pid=%s path=%s available_memory_mb=%s",
-            os.getpid(),
-            MODEL_PATH,
-            available_memory_mb(),
-        )
-        detector = YOLO(str(MODEL_PATH))
-        detector.to("cpu")
-        detector.overrides.update({
-            "device": "cpu",
-            "imgsz": INFERENCE_SIZE,
-            "half": False,
-            "verbose": False,
-        })
-        _model = detector
-        app.logger.info(
-            "YOLO LOAD COMPLETE pid=%s elapsed=%.2fs torch_threads=%s available_memory_mb=%s",
-            os.getpid(),
-            time.perf_counter() - model_started,
-            torch.get_num_threads(),
-            available_memory_mb(),
-        )
-        return _model
-
-
 def yolo_predict(filepath):
-    prediction_started = time.perf_counter()
-    app.logger.info("INFERENCE REQUEST START pid=%s", os.getpid())
-    detector = load_yolo_model()
     preprocessing_started = time.perf_counter()
-    inference_image = None
-    results = None
+    image = None
     try:
         with Image.open(filepath) as source:
             source.verify()
         with Image.open(filepath) as source:
-            inference_image = source.convert("RGB")
-            inference_image.thumbnail((INFERENCE_SIZE, INFERENCE_SIZE), Image.Resampling.LANCZOS)
+            image = source.convert("RGB")
             app.logger.info(
                 "Inference image prepared size=%sx%s elapsed=%.2fs",
-                inference_image.width,
-                inference_image.height,
+                image.width,
+                image.height,
                 time.perf_counter() - preprocessing_started,
             )
-        inference_started = time.perf_counter()
-        app.logger.info("YOLO INFERENCE START pid=%s available_memory_mb=%s", os.getpid(), available_memory_mb())
-        try:
-            with torch.inference_mode():
-                results = detector.predict(
-                    source=inference_image,
-                    device="cpu",
-                    imgsz=INFERENCE_SIZE,
-                    batch=1,
-                    conf=0.25,
-                    iou=0.45,
-                    half=False,
-                    max_det=10,
-                    verbose=False,
-                    save=False,
-                    show=False,
-                    stream=False,
-                )
-        except Exception:
-            app.logger.exception("YOLO INFERENCE FAILED pid=%s elapsed=%.2fs", os.getpid(), time.perf_counter() - inference_started)
-            raise
-        app.logger.info("YOLO INFERENCE COMPLETE pid=%s elapsed=%.2fs available_memory_mb=%s", os.getpid(), time.perf_counter() - inference_started, available_memory_mb())
-        if not results or results[0].boxes is None or len(results[0].boxes) == 0:
-            return {"detections": [], "inference_size": None}
-        result = results[0]
-        names = result.names or getattr(detector, "names", {})
-        detections = []
-        for index in range(len(result.boxes)):
-            detections.append({
-                "raw_bbox": [float(value) for value in result.boxes.xyxy[index].tolist()],
-                "yolo_class_id": int(result.boxes.cls[index].item()),
-                "yolo_class": names.get(int(result.boxes.cls[index].item()), str(int(result.boxes.cls[index].item()))) if isinstance(names, dict) else str(int(result.boxes.cls[index].item())),
-                "yolo_confidence": float(result.boxes.conf[index].item()),
-            })
-        inference_size = inference_image.size
-        return {"detections": detections, "inference_size": inference_size}
+        app.logger.info("ONNX INFERENCE START pid=%s available_memory_mb=%s", os.getpid(), available_memory_mb())
+        detections = onnx_predict(image)
+        app.logger.info("ONNX DETECTIONS count=%s", len(detections))
+        return {"detections": detections, "inference_size": image.size}
+    except FileNotFoundError:
+        app.logger.exception("ONNX MODEL UNAVAILABLE pid=%s", os.getpid())
+        raise
+    except Exception:
+        app.logger.exception("ONNX INFERENCE FAILED pid=%s", os.getpid())
+        raise
     finally:
-        if results:
-            del results
-        if inference_image is not None:
-            inference_image.close()
+        if image is not None:
+            image.close()
         gc.collect()
 
 
@@ -496,7 +414,7 @@ def save_upload(upload):
 def health():
     return {
         "status": "healthy",
-        "yolo_loaded": _model is not None,
+        "yolo_loaded": onnx_session_loaded(),
         "groq_configured": bool(os.getenv("GROQ_API_KEY")),
         "database_configured": using_postgres() or DB_PATH.is_file(),
         "available_memory_mb": available_memory_mb(),
@@ -660,8 +578,12 @@ def predict():
     except ValueError as exc:
         flash(str(exc), "warning")
         return redirect(url_for("input"))
+    except FileNotFoundError:
+        flash("Prediction is temporarily unavailable because the ONNX model is not installed.", "danger")
+        app.logger.exception("Prediction failed because the ONNX model is missing")
+        return redirect(url_for("input"))
     except Exception:
-        app.logger.exception("YOLO prediction failed")
+        app.logger.exception("ONNX prediction failed")
         flash("Prediction could not be completed. Confirm the image and try again.", "danger")
         return redirect(url_for("input"))
     finally:
@@ -671,9 +593,9 @@ def predict():
 try:
     init_db()
     app.logger.info(
-        "WORKER READY pid=%s yolo_loaded=%s groq_configured=%s",
+        "WORKER READY pid=%s onnx_session_loaded=%s groq_configured=%s",
         os.getpid(),
-        _model is not None,
+        onnx_session_loaded(),
         bool(os.getenv("GROQ_API_KEY")),
     )
 except Exception:

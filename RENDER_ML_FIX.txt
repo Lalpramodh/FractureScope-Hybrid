@@ -1,9 +1,9 @@
 FractureScope Render deployment notes
 
-- The application uses yolov8_model.pt as its only local inference model.
-- The detector is lazy-loaded once per Gunicorn worker and reused; /health does not load it.
-- CPU inference uses a single 320px inference image, torch.inference_mode(), confidence 0.25, and max_det 10.
-- Model fusion and startup warmup are disabled to avoid load-time memory spikes.
+- Production uses yolov8_model.onnx, exported from the unchanged yolov8_model.pt source model.
+- The ONNX session is lazy-loaded once per Gunicorn worker and reused; /health does not load it.
+- CPU inference uses OpenCV-compatible rectangular stride-aligned letterbox preprocessing, target size 320, confidence 0.25, IoU 0.45, and max_det 10.
+- The runtime has one sequential ONNX CPU thread configuration and no model warmup.
 - Gunicorn runs one worker and one thread: gunicorn app:app --workers 1 --threads 1 --timeout 300
 - Groq Vision analyzes at most three highest-confidence detection crops by default.
 - PostgreSQL is used when DATABASE_URL is set; SQLite is a local-development fallback.

@@ -5,8 +5,8 @@ AI-assisted X-ray fracture screening with a Flask web interface. YOLOv8 performs
 ## Production contract
 
 - Python: `3.11.9`
-- Inference: YOLOv8 uses `yolov8_model.pt`; Groq Vision analyzes padded detection crops
-- Runtime: CPU-only, one YOLO instance per worker, YOLO inference size `320`, up to three Groq region requests per upload
+- Inference: ONNX Runtime uses `yolov8_model.onnx`, exported from `yolov8_model.pt`; Groq Vision analyzes padded detection crops
+- Runtime: CPU-only, one ONNX session per worker, dynamic 320px stride-aligned input, up to three Groq region requests per upload
 - Web server: one Gunicorn worker and one thread
 - Database: PostgreSQL in production or SQLite for local development
 - Health check: `/health`
@@ -16,10 +16,10 @@ AI-assisted X-ray fracture screening with a Flask web interface. YOLOv8 performs
 Render can use `render.yaml` directly. The equivalent start command is:
 
 ```text
-gunicorn app:app --workers 1 --threads 1 --timeout 180 --graceful-timeout 30 --max-requests 20 --max-requests-jitter 5
+gunicorn app:app --workers 1 --threads 1 --timeout 300
 ```
 
-Set `SECRET_KEY`, `DATABASE_URL`, and `GROQ_API_KEY` in the Render environment. `GROQ_VISION_MODEL` is configurable and defaults to `meta-llama/llama-4-scout-17b-16e-instruct`. The YOLO model path remains configurable through `YOLO_MODEL_PATH`.
+Set `SECRET_KEY`, `DATABASE_URL`, and `GROQ_API_KEY` in the Render environment. `GROQ_VISION_MODEL` is configurable and defaults to `meta-llama/llama-4-scout-17b-16e-instruct`. `YOLO_ONNX_MODEL_PATH` is optional and defaults to `yolov8_model.onnx`.
 
 ## Environment variables
 
@@ -38,6 +38,8 @@ Never commit real values. When `GROQ_API_KEY` is absent or the API fails, YOLO r
 python -m pip install -r requirements.txt
 python app.py
 ```
+
+The development-only export uses `requirements-export.txt`, then runs `python export_yolo_onnx.py` from that environment. Render installs only `requirements.txt` and never imports PyTorch or Ultralytics.
 
 Then open `http://localhost:5000/health`. It returns HTTP 200 without authentication and reports `yolo_loaded`, `groq_configured`, and database status without exposing secrets.
 

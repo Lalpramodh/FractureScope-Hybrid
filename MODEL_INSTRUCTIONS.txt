@@ -1,7 +1,7 @@
 FractureScope model contract
 
-YOLOv8 remains the only local inference model. Keep yolov8_model.pt in the project root or set YOLO_MODEL_PATH. Each Gunicorn worker lazily loads one detector, reuses it for CPU inference, and never unloads it between requests.
+YOLOv8 remains the detector source model. Keep yolov8_model.pt for development/export and yolov8_model.onnx for production. Each Gunicorn worker lazily loads one ONNX Runtime session, reuses it for CPU inference, and never loads the PyTorch model.
 
-Render inference uses a single resized image at imgsz=320, torch.inference_mode(), confidence 0.25, and max_det=10. Model fusion and startup warmup are intentionally disabled to reduce peak memory. The health endpoint does not load YOLO.
+Render inference uses OpenCV-compatible rectangular stride-aligned letterbox preprocessing with a 320px target, confidence 0.25, class-aware NMS at IoU 0.45, and max_det=10. The ONNX session is sequential, single-threaded, has no warmup, and the health endpoint does not load it.
 
-Groq Vision is the secondary analysis system. The application sends padded crops for at most GROQ_MAX_REGIONS regions per upload, defaulting to the three highest-confidence YOLO detections. GROQ_API_KEY is read only from the environment and GROQ_VISION_MODEL is configurable.
+Groq Vision is the secondary analysis system. The application sends padded crops for at most GROQ_MAX_REGIONS regions per upload, defaulting to the three highest-confidence YOLO detections. GROQ_API_KEY is read only from the environment and GROQ_VISION_MODEL is configurable. Use requirements-export.txt only for development export/comparison; it is not a production dependency file.
