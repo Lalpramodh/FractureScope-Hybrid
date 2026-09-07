@@ -5,6 +5,7 @@ import logging
 import re
 import gc
 import json
+import base64
 import tempfile
 import time
 from contextlib import contextmanager
@@ -28,6 +29,7 @@ except ImportError:  # PostgreSQL is optional for local SQLite development.
     psycopg2 = None
     RealDictCursor = None
 from ultralytics import YOLO
+from groq import Groq
 from werkzeug.security import check_password_hash, generate_password_hash
 from werkzeug.utils import secure_filename
 
@@ -46,10 +48,11 @@ except RuntimeError:
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = Path(os.getenv("YOLO_MODEL_PATH", BASE_DIR / "yolov8_model.pt"))
-SWIN_MODEL_PATH = Path(os.getenv("SWIN_MODEL_PATH", BASE_DIR / "model.pth"))
 DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "fracturescope.db"))
 UPLOAD_FOLDER = BASE_DIR / "static" / "uploads"
-ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png"}
+ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
+GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MAX_REGIONS = 5
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY")
@@ -69,16 +72,11 @@ if not os.getenv("DATABASE_URL"):
 
 _model = None
 _model_lock = threading.Lock()
-_swin_model = None
-_swin_transform = None
-_swin_lock = threading.Lock()
+_inference_lock = threading.Lock()
+_groq_client = None
 INFERENCE_SIZE = 384
 MAX_INFERENCE_DIMENSION = 2048
-SWIN_INPUT_SIZE = 224
-SWIN_CROP_PADDING = float(os.getenv("SWIN_CROP_PADDING", "0.08"))
-SWIN_CLASS_NAMES = [name.strip() for name in os.getenv("SWIN_CLASS_NAMES", "").split(",") if name.strip()]
-SWIN_EXCLUSIVE_MEMORY = os.getenv("SWIN_EXCLUSIVE_MEMORY", "true").lower() == "true"
-SWIN_MEMORY_RESERVE_MB = int(os.getenv("SWIN_MEMORY_RESERVE_MB", "460"))
+GROQ_CROP_PADDING = float(os.getenv("GROQ_CROP_PADDING", "0.08"))
 
 
 def available_memory_mb():
@@ -105,23 +103,6 @@ def reclaim_process_memory():
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except (OSError, AttributeError):
             pass
-
-
-def release_yolo_for_swin():
-    global _model
-    if _model is not None:
-        app.logger.info("Releasing YOLO memory for Swin classification")
-        _model = None
-        reclaim_process_memory()
-
-
-def release_swin_after_prediction():
-    global _swin_model, _swin_transform
-    if _swin_model is not None:
-        app.logger.info("Releasing Swin memory after classification")
-        _swin_model = None
-        _swin_transform = None
-        reclaim_process_memory()
 
 
 def using_postgres():
@@ -234,9 +215,10 @@ def load_yolo_model():
             raise FileNotFoundError(f"YOLO model not found at {MODEL_PATH}")
         model_started = time.perf_counter()
         app.logger.info(
-            "MODEL LOAD START pid=%s path=%s",
+            "YOLO LOAD START pid=%s path=%s available_memory_mb=%s",
             os.getpid(),
             MODEL_PATH,
+            available_memory_mb(),
         )
         detector = YOLO(str(MODEL_PATH))
         detector.to("cpu")
@@ -271,11 +253,12 @@ def load_yolo_model():
         torch.set_num_threads(1)
         _model = detector
         app.logger.info(
-            "MODEL LOAD COMPLETE pid=%s elapsed=%.2fs warmup=%.2fs torch_threads=%s",
+            "YOLO LOAD COMPLETE pid=%s elapsed=%.2fs warmup=%.2fs torch_threads=%s available_memory_mb=%s",
             os.getpid(),
             time.perf_counter() - model_started,
             time.perf_counter() - warmup_started,
             torch.get_num_threads(),
+            available_memory_mb(),
         )
         return _model
 
@@ -293,27 +276,27 @@ def yolo_predict(filepath):
     results = None
     try:
         inference_started = time.perf_counter()
-        app.logger.info("INFERENCE START pid=%s", os.getpid())
-        with torch.inference_mode():
-            results = detector.predict(
-                source=str(inference_path),
-                device="cpu",
-                imgsz=INFERENCE_SIZE,
-                batch=1,
-                conf=0.25,
-                iou=0.45,
-                half=False,
-                max_det=20,
-                verbose=False,
-                save=False,
-                show=False,
-                stream=False,
-            )
-        app.logger.info(
-            "INFERENCE COMPLETE pid=%s elapsed=%.2fs",
-            os.getpid(),
-            time.perf_counter() - inference_started,
-        )
+        app.logger.info("YOLO INFERENCE START pid=%s available_memory_mb=%s", os.getpid(), available_memory_mb())
+        try:
+            with torch.inference_mode():
+                results = detector.predict(
+                    source=str(inference_path),
+                    device="cpu",
+                    imgsz=INFERENCE_SIZE,
+                    batch=1,
+                    conf=0.25,
+                    iou=0.45,
+                    half=False,
+                    max_det=20,
+                    verbose=False,
+                    save=False,
+                    show=False,
+                    stream=False,
+                )
+        except Exception:
+            app.logger.exception("YOLO INFERENCE FAILED pid=%s elapsed=%.2fs", os.getpid(), time.perf_counter() - inference_started)
+            raise
+        app.logger.info("YOLO INFERENCE COMPLETE pid=%s elapsed=%.2fs available_memory_mb=%s", os.getpid(), time.perf_counter() - inference_started, available_memory_mb())
         if not results or results[0].boxes is None or len(results[0].boxes) == 0:
             return {"detections": [], "inference_size": None}
         result = results[0]
@@ -337,94 +320,10 @@ def yolo_predict(filepath):
         gc.collect()
 
 
-def load_swin_model():
-    """Load the timm Swin-Base checkpoint once for this worker."""
-    global _swin_model, _swin_transform
-    if _swin_model is not None:
-        return _swin_model, _swin_transform
-    with _swin_lock:
-        if _swin_model is not None:
-            return _swin_model, _swin_transform
-        if not SWIN_MODEL_PATH.is_file():
-            raise FileNotFoundError(f"Swin model not found at {SWIN_MODEL_PATH}")
-        started = time.perf_counter()
-        app.logger.info("Swin lazy loading started path=%s", SWIN_MODEL_PATH)
-        available = available_memory_mb()
-        if available is not None and available < SWIN_MEMORY_RESERVE_MB:
-            raise MemoryError(
-                f"Insufficient memory for Swin classification: {available:.1f} MB available, "
-                f"{SWIN_MEMORY_RESERVE_MB} MB required"
-            )
-        if psutil is not None:
-            app.logger.info("Memory before Swin load: %.1f MB", psutil.Process().memory_info().rss / 1048576)
-        checkpoint = None
-        model = None
-        try:
-            import timm
-            from timm.data import create_transform
-            checkpoint = torch.load(SWIN_MODEL_PATH, map_location="cpu", weights_only=True, mmap=True)
-            if not isinstance(checkpoint, dict) or "head.fc.weight" not in checkpoint:
-                raise ValueError("Swin checkpoint is not a supported timm state dict")
-            class_count = int(checkpoint["head.fc.weight"].shape[0])
-            if len(SWIN_CLASS_NAMES) not in (0, class_count):
-                raise ValueError(f"SWIN_CLASS_NAMES must contain exactly {class_count} labels")
-            model = timm.create_model(
-                "swin_base_patch4_window7_224",
-                pretrained=False,
-                num_classes=class_count,
-            )
-            model = model.half()
-            model_state = model.state_dict()
-            with torch.no_grad():
-                for key, value in checkpoint.items():
-                    model_state[key].copy_(value)
-            del model_state
-            model.to("cpu").eval()
-            _swin_transform = create_transform(
-                input_size=(3, SWIN_INPUT_SIZE, SWIN_INPUT_SIZE),
-                is_training=False,
-                mean=(0.485, 0.456, 0.406),
-                std=(0.229, 0.224, 0.225),
-                interpolation="bicubic",
-            )
-            _swin_model = model
-            labels = SWIN_CLASS_NAMES or [f"Checkpoint class {index}" for index in range(class_count)]
-            if psutil is not None:
-                app.logger.info("Memory after Swin load: %.1f MB", psutil.Process().memory_info().rss / 1048576)
-            app.logger.info(
-                "Swin model loaded in %.2fs architecture=swin_base_patch4_window7_224 classes=%s labels=%s",
-                time.perf_counter() - started,
-                class_count,
-                labels,
-            )
-            return _swin_model, _swin_transform
-        finally:
-            del checkpoint
-            gc.collect()
-
-
-def classify_fracture(crop):
-    started = time.perf_counter()
-    app.logger.info("Swin classification started")
-    model, transform = load_swin_model()
-    tensor = transform(crop.convert("RGB")).unsqueeze(0).half()
-    try:
-        with torch.inference_mode():
-            probabilities = torch.softmax(model(tensor), dim=1)[0]
-            class_id = int(probabilities.argmax().item())
-            confidence = float(probabilities[class_id].item())
-        labels = SWIN_CLASS_NAMES or [f"Checkpoint class {index}" for index in range(len(probabilities))]
-        app.logger.info("Swin classification completed in %.2fs", time.perf_counter() - started)
-        return labels[class_id], confidence
-    finally:
-        del tensor
-        gc.collect()
-
-
 def _padded_box(box, width, height):
     x1, y1, x2, y2 = box
-    padding_x = (x2 - x1) * SWIN_CROP_PADDING
-    padding_y = (y2 - y1) * SWIN_CROP_PADDING
+    padding_x = (x2 - x1) * GROQ_CROP_PADDING
+    padding_y = (y2 - y1) * GROQ_CROP_PADDING
     return (
         max(0, int(x1 - padding_x)),
         max(0, int(y1 - padding_y)),
@@ -441,7 +340,7 @@ def _annotate_image(filepath, detections):
         draw = ImageDraw.Draw(image)
         for index, detection in enumerate(detections, start=1):
             x1, y1, x2, y2 = detection["bbox"]
-            label = f"#{index} YOLO {detection['yolo_confidence'] * 100:.1f}% | {detection['swin_class']} {detection['swin_confidence'] * 100:.1f}%" if detection["swin_confidence"] is not None else f"#{index} YOLO {detection['yolo_confidence'] * 100:.1f}% | {detection['swin_class']}"
+            label = f"#{index} YOLO {detection['yolo_confidence'] * 100:.1f}%"
             draw.rectangle((x1, y1, x2, y2), outline="#45c69c", width=max(3, image.width // 350))
             text_box = draw.textbbox((x1, y1), label)
             text_height = text_box[3] - text_box[1]
@@ -452,40 +351,116 @@ def _annotate_image(filepath, detections):
     return annotated_path
 
 
-def run_hybrid_prediction(filepath):
+def _groq_client_instance():
+    global _groq_client
+    if _groq_client is None and os.getenv("GROQ_API_KEY"):
+        _groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+    return _groq_client
+
+
+def _fallback_analysis(message):
+    return {
+        "possible_fracture_type": "Unable to determine",
+        "confidence_level": "Unavailable",
+        "description": message,
+        "observations": [],
+        "limitations": "Groq Vision analysis was not available for this region.",
+        "recommendation": "Have the image reviewed by a qualified radiologist or healthcare professional.",
+    }
+
+
+def _parse_groq_response(content):
+    try:
+        return json.loads(content)
+    except (TypeError, json.JSONDecodeError):
+        match = re.search(r"\{.*\}", content or "", re.DOTALL)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+
+
+def analyze_crop_with_groq(crop, region_number):
+    client = _groq_client_instance()
+    if client is None:
+        return _fallback_analysis("Groq Vision analysis is unavailable because GROQ_API_KEY is not configured.")
+    buffer = tempfile.SpooledTemporaryFile(max_size=2 * 1024 * 1024)
+    try:
+        prepared = crop.copy()
+        prepared.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+        prepared.save(buffer, format="JPEG", quality=88, optimize=True)
+        prepared.close()
+        buffer.seek(0)
+        encoded = base64.b64encode(buffer.read()).decode("ascii")
+        prompt = (
+            "You are reviewing region %d of an X-ray image. YOLOv8 has already localized a possible fracture region. "
+            "Visually describe only what can reasonably be observed in this crop. Return JSON only with exactly these "
+            "fields: possible_fracture_type, confidence_level, description, observations, limitations, recommendation. "
+            "possible_fracture_type must be a possible pattern, not a diagnosis, using one of Transverse, Oblique, "
+            "Spiral, Comminuted, Greenstick, Impacted, Avulsion, Hairline / subtle, Other, or Unable to determine. "
+            "Do not infer patient information or medical history. State Unable to determine when image quality or pattern "
+            "is insufficient. Never claim a confirmed diagnosis. observations must be an array of strings."
+        ) % region_number
+        app.logger.info("GROQ ANALYSIS START region=%s model=%s", region_number, GROQ_VISION_MODEL)
+        response = client.chat.completions.create(
+            model=GROQ_VISION_MODEL,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
+            ]}],
+        )
+        payload = _parse_groq_response(response.choices[0].message.content)
+        if not isinstance(payload, dict):
+            return _fallback_analysis("Groq returned an invalid analysis response.")
+        observations = payload.get("observations", [])
+        if not isinstance(observations, list):
+            observations = [str(observations)]
+        return {
+            "possible_fracture_type": str(payload.get("possible_fracture_type") or "Unable to determine"),
+            "confidence_level": str(payload.get("confidence_level") or "Unavailable"),
+            "description": str(payload.get("description") or "No description was returned."),
+            "observations": [str(item) for item in observations[:10]],
+            "limitations": str(payload.get("limitations") or "No limitations were provided."),
+            "recommendation": str(payload.get("recommendation") or "Seek professional review."),
+        }
+    except Exception:
+        app.logger.exception("GROQ ANALYSIS FAILED region=%s", region_number)
+        return _fallback_analysis("Analysis temporarily unavailable.")
+    finally:
+        buffer.close()
+
+
+def _run_hybrid_prediction(filepath):
     started = time.perf_counter()
     app.logger.info("Hybrid prediction started")
     results = yolo_predict(filepath)
     if not results["detections"]:
-        return {"detections": [], "summary": "No fracture detected"}, None
-    if SWIN_EXCLUSIVE_MEMORY:
-        release_yolo_for_swin()
-    with Image.open(filepath) as original:
-        original_image = original.convert("RGB")
-        original_width, original_height = original_image.size
+        return {"detections": [], "summary": "No fracture region detected by the YOLO model."}, None
+    original_image = None
     try:
+        with Image.open(filepath) as original:
+            original_image = original.convert("RGB")
+        original_width, original_height = original_image.size
         inference_width, inference_height = results["inference_size"]
         detections = []
-        for index, yolo_detection in enumerate(results["detections"]):
+        for index, yolo_detection in enumerate(results["detections"][:GROQ_MAX_REGIONS]):
             raw_box = yolo_detection["raw_bbox"]
             scale_x = original_width / inference_width
             scale_y = original_height / inference_height
             bbox = [round(raw_box[0] * scale_x), round(raw_box[1] * scale_y), round(raw_box[2] * scale_x), round(raw_box[3] * scale_y)]
             crop_box = _padded_box(bbox, original_width, original_height)
             crop = original_image.crop(crop_box)
-            try:
-                swin_class, swin_confidence = classify_fracture(crop)
-            except Exception:
-                app.logger.exception("Swin classification failed for region %s", index + 1)
-                swin_class, swin_confidence = "Classification unavailable", None
-            finally:
-                crop.close()
+            groq_analysis = analyze_crop_with_groq(crop, index + 1)
+            crop.close()
             detections.append({
                 "bbox": bbox,
                 "yolo_class": yolo_detection["yolo_class"],
                 "yolo_confidence": yolo_detection["yolo_confidence"],
-                "swin_class": swin_class,
-                "swin_confidence": swin_confidence,
+                **groq_analysis,
             })
         annotated_path = _annotate_image(filepath, detections)
         result = {"detections": detections, "summary": f"{len(detections)} fracture region(s) detected"}
@@ -493,13 +468,15 @@ def run_hybrid_prediction(filepath):
         return result, annotated_path
     finally:
         del results
-        if SWIN_EXCLUSIVE_MEMORY:
-            release_swin_after_prediction()
-            try:
-                load_yolo_model()
-            except Exception:
-                app.logger.exception("YOLO restoration failed after Swin classification")
+        if original_image is not None:
+            original_image.close()
         reclaim_process_memory()
+
+
+def run_hybrid_prediction(filepath):
+    """Run one complete YOLO and Groq operation without concurrent inference."""
+    with _inference_lock:
+        return _run_hybrid_prediction(filepath)
 
 
 def allowed_file(filename):
@@ -543,8 +520,11 @@ def prepare_inference_image(filepath):
 def health():
     return {
         "status": "healthy",
-        "model_loaded": _model is not None,
+        "yolo_loaded": _model is not None,
+        "groq_configured": bool(os.getenv("GROQ_API_KEY")),
         "database_configured": using_postgres() or DB_PATH.is_file(),
+        "available_memory_mb": available_memory_mb(),
+        "process_id": os.getpid(),
     }, 200
 
 
@@ -693,7 +673,7 @@ def predict():
                     (session["user_id"], session["username"], str(filepath), result, json.dumps(hybrid_result), str(annotated_path) if annotated_path else None),
                 )
         app.logger.info("DATABASE SAVE COMPLETE pid=%s", os.getpid())
-        flash(f"Hybrid analysis: {result}", "success")
+        flash(f"AI analysis: {result}", "success")
         keep_upload = True
         app.logger.info(
             "Prediction request completed in %.2f seconds",
@@ -714,12 +694,11 @@ def predict():
 
 try:
     init_db()
-    load_yolo_model()
     app.logger.info(
-        "WORKER READY pid=%s yolo_loaded=%s swin_loaded=%s",
+        "WORKER READY pid=%s yolo_loaded=%s groq_configured=%s",
         os.getpid(),
         _model is not None,
-        _swin_model is not None,
+        bool(os.getenv("GROQ_API_KEY")),
     )
 except Exception:
     app.logger.exception("WORKER STARTUP FAILED pid=%s", os.getpid())

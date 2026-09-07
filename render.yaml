@@ -20,9 +20,9 @@ services:
         value: "1"
       - key: YOLO_CONFIG_DIR
         value: /tmp/Ultralytics
-      - key: SWIN_EXCLUSIVE_MEMORY
-        value: "true"
-      - key: SWIN_MEMORY_RESERVE_MB
-        value: "460"
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GROQ_VISION_MODEL
+        value: meta-llama/llama-4-scout-17b-16e-instruct
       - key: PYTHONUNBUFFERED
         value: "1"
