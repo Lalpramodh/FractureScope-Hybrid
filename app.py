@@ -5,8 +5,6 @@ import logging
 import re
 import gc
 import json
-import base64
-import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -42,9 +40,8 @@ BASE_DIR = Path(__file__).resolve().parent
 DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "fracturescope.db"))
 UPLOAD_FOLDER = BASE_DIR / "static" / "uploads"
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
-GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-GROQ_MAX_REGIONS = max(1, int(os.getenv("GROQ_MAX_REGIONS", "3")))
-GROQ_MAX_OUTPUT_TOKENS = max(256, int(os.getenv("GROQ_MAX_OUTPUT_TOKENS", "600")))
+GROQ_CHAT_MODEL = os.getenv("GROQ_CHAT_MODEL", "llama-3.1-8b-instant")
+GROQ_CHAT_MAX_TOKENS = max(128, int(os.getenv("GROQ_CHAT_MAX_TOKENS", "300")))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY")
@@ -64,7 +61,6 @@ if not os.getenv("DATABASE_URL"):
 
 _inference_lock = threading.Lock()
 _groq_client = None
-GROQ_CROP_PADDING = float(os.getenv("GROQ_CROP_PADDING", "0.08"))
 
 
 def available_memory_mb():
@@ -221,18 +217,6 @@ def yolo_predict(filepath):
         gc.collect()
 
 
-def _padded_box(box, width, height):
-    x1, y1, x2, y2 = box
-    padding_x = (x2 - x1) * GROQ_CROP_PADDING
-    padding_y = (y2 - y1) * GROQ_CROP_PADDING
-    return (
-        max(0, int(x1 - padding_x)),
-        max(0, int(y1 - padding_y)),
-        min(width, int(x2 + padding_x)),
-        min(height, int(y2 + padding_y)),
-    )
-
-
 def _annotate_image(filepath, detections):
     annotated_name = f"annotated_{Path(filepath).name}"
     annotated_path = UPLOAD_FOLDER / annotated_name
@@ -259,94 +243,29 @@ def _groq_client_instance():
     return _groq_client
 
 
-def _fallback_analysis(message):
-    return {
-        "possible_fracture_type": "Unable to determine",
-        "confidence_level": "Unavailable",
-        "description": message,
-        "observations": [],
-        "limitations": "Groq Vision analysis was not available for this region.",
-        "recommendation": "Have the image reviewed by a qualified radiologist or healthcare professional.",
-    }
-
-
-def _parse_groq_response(content):
-    try:
-        return json.loads(content)
-    except (TypeError, json.JSONDecodeError):
-        match = re.search(r"\{.*\}", content or "", re.DOTALL)
-        if not match:
-            return None
-        try:
-            return json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return None
-
-
-def analyze_crop_with_groq(crop, region_number):
-    started = time.perf_counter()
+def chat_with_groq(messages):
     client = _groq_client_instance()
     if client is None:
-        return _fallback_analysis("Groq Vision analysis is unavailable because GROQ_API_KEY is not configured.")
-    buffer = None
+        return "Chat is unavailable because GROQ_API_KEY is not configured."
     try:
-        buffer = tempfile.SpooledTemporaryFile(max_size=2 * 1024 * 1024)
-        prepared = crop.copy()
-        prepared.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-        prepared.save(buffer, format="JPEG", quality=88, optimize=True)
-        prepared.close()
-        buffer.seek(0)
-        encoded = base64.b64encode(buffer.read()).decode("ascii")
-        prompt = (
-            "You are reviewing region %d of an X-ray image. YOLOv8 has already localized a possible fracture region. "
-            "Visually describe only what can reasonably be observed in this crop. Be concise. Return JSON only with exactly these "
-            "fields: possible_fracture_type, confidence_level, description, observations, limitations, recommendation. "
-            "possible_fracture_type must be a possible pattern, not a diagnosis, using one of Transverse, Oblique, "
-            "Spiral, Comminuted, Greenstick, Impacted, Avulsion, Hairline / subtle, Other, or Unable to determine. "
-            "Do not infer patient information or medical history. State Unable to determine when image quality or pattern "
-            "is insufficient. Never claim a confirmed diagnosis. observations must be an array of at most 3 short strings. "
-            "Keep every text field brief and keep the complete JSON response under 450 tokens."
-        ) % region_number
-        app.logger.info("GROQ ANALYSIS START region=%s model=%s", region_number, GROQ_VISION_MODEL)
         response = client.chat.completions.create(
-            model=GROQ_VISION_MODEL,
+            model=GROQ_CHAT_MODEL,
             temperature=0,
-            max_tokens=GROQ_MAX_OUTPUT_TOKENS,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{encoded}"}},
-            ]}],
+            max_tokens=GROQ_CHAT_MAX_TOKENS,
+            messages=messages,
         )
-        payload = _parse_groq_response(response.choices[0].message.content)
-        if not isinstance(payload, dict):
-            return _fallback_analysis("Groq returned an invalid analysis response.")
-        observations = payload.get("observations", [])
-        if not isinstance(observations, list):
-            observations = [str(observations)]
-        return {
-            "possible_fracture_type": str(payload.get("possible_fracture_type") or "Unable to determine"),
-            "confidence_level": str(payload.get("confidence_level") or "Unavailable"),
-            "description": str(payload.get("description") or "No description was returned."),
-            "observations": [str(item) for item in observations[:10]],
-            "limitations": str(payload.get("limitations") or "No limitations were provided."),
-            "recommendation": str(payload.get("recommendation") or "Seek professional review."),
-        }
+        return response.choices[0].message.content.strip()
     except RateLimitError as exc:
-        app.logger.warning("GROQ RATE LIMIT region=%s message=%s", region_number, str(exc)[:240])
-        return _fallback_analysis("Groq analysis is temporarily unavailable because the model token limit was reached.")
+        app.logger.warning("GROQ CHAT RATE LIMIT message=%s", str(exc)[:240])
+        return "Chat is temporarily unavailable because the Groq request limit was reached."
     except Exception:
-        app.logger.exception("GROQ ANALYSIS FAILED region=%s", region_number)
-        return _fallback_analysis("Analysis temporarily unavailable.")
-    finally:
-        if buffer is not None:
-            buffer.close()
-        app.logger.info("GROQ ANALYSIS COMPLETE region=%s elapsed=%.2fs", region_number, time.perf_counter() - started)
+        app.logger.exception("GROQ CHAT FAILED")
+        return "Chat is temporarily unavailable. Please try again later."
 
 
-def _run_hybrid_prediction(filepath):
+def _run_yolo_prediction(filepath):
     started = time.perf_counter()
-    app.logger.info("YOLO + Groq prediction started")
+    app.logger.info("YOLO prediction started")
     results = yolo_predict(filepath)
     if not results["detections"]:
         app.logger.info("YOLO detections=%s", 0)
@@ -367,24 +286,11 @@ def _run_hybrid_prediction(filepath):
                 "bbox": bbox,
                 "yolo_class": yolo_detection["yolo_class"],
                 "yolo_confidence": yolo_detection["yolo_confidence"],
-                **_fallback_analysis("This region was not sent to Groq because the per-image analysis limit was reached."),
             })
         app.logger.info("YOLO detections=%s", len(detections))
-        groq_indices = sorted(
-            range(len(detections)),
-            key=lambda item: detections[item]["yolo_confidence"],
-            reverse=True,
-        )[:GROQ_MAX_REGIONS]
-        for index in groq_indices:
-            crop_box = _padded_box(detections[index]["bbox"], original_width, original_height)
-            crop = original_image.crop(crop_box)
-            try:
-                detections[index].update(analyze_crop_with_groq(crop, index + 1))
-            finally:
-                crop.close()
         annotated_path = _annotate_image(filepath, detections)
         result = {"detections": detections, "summary": f"{len(detections)} fracture region(s) detected"}
-        app.logger.info("YOLO + Groq prediction completed in %.2fs", time.perf_counter() - started)
+        app.logger.info("YOLO prediction completed in %.2fs", time.perf_counter() - started)
         return result, annotated_path
     finally:
         del results
@@ -393,10 +299,10 @@ def _run_hybrid_prediction(filepath):
         reclaim_process_memory()
 
 
-def run_hybrid_prediction(filepath):
-    """Run one complete YOLO and Groq operation without concurrent inference."""
+def run_yolo_prediction(filepath):
+    """Run one complete YOLO operation without concurrent inference."""
     with _inference_lock:
-        return _run_hybrid_prediction(filepath)
+        return _run_yolo_prediction(filepath)
 
 
 def allowed_file(filename):
@@ -429,6 +335,36 @@ def health():
         "available_memory_mb": available_memory_mb(),
         "process_id": os.getpid(),
     }, 200
+
+
+@app.route("/chat", methods=["POST"])
+def chat():
+    payload = request.get_json(silent=True) or {}
+    incoming = payload.get("messages", [])
+    if not isinstance(incoming, list):
+        return {"reply": "Please send a valid chat message."}, 400
+    messages = []
+    for item in incoming[-10:]:
+        if not isinstance(item, dict) or item.get("role") not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content", "")).strip()
+        if content:
+            messages.append({"role": item["role"], "content": content[:1200]})
+    if not messages or messages[-1]["role"] != "user":
+        return {"reply": "Please enter a question first."}, 400
+    system_message = {
+        "role": "system",
+        "content": (
+            "You are FractureScope's helpful health-information assistant. Be concise and clear. "
+            "You may explain X-rays, fracture terminology, the app workflow, and general safety guidance. "
+            "Do not diagnose, confirm a fracture, interpret an individual image, infer patient details, "
+            "or replace a radiologist or healthcare professional. For urgent symptoms, advise professional care."
+        ),
+    }
+    started = time.perf_counter()
+    reply = chat_with_groq([system_message, *messages])
+    app.logger.info("GROQ CHAT COMPLETE elapsed=%.2fs", time.perf_counter() - started)
+    return {"reply": reply}, 200
 
 
 @app.errorhandler(413)
@@ -562,7 +498,7 @@ def predict():
     try:
         filepath, relative_path = save_upload(upload)
         app.logger.info("UPLOAD VALIDATED pid=%s", os.getpid())
-        hybrid_result, annotated_path = run_hybrid_prediction(str(filepath))
+        hybrid_result, annotated_path = run_yolo_prediction(str(filepath))
         result = hybrid_result["summary"]
         with get_db() as connection:
             if using_postgres():

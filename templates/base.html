@@ -57,6 +57,15 @@
     {% block content %}{% endblock %}
   </main>
 
+  <aside class="chat-widget" data-chat-widget>
+    <button class="chat-launcher" type="button" aria-label="Open FractureScope assistant" aria-expanded="false" data-chat-toggle>?</button>
+    <section class="chat-panel" aria-label="FractureScope assistant" data-chat-panel hidden>
+      <div class="chat-heading"><div><strong>FractureScope assistant</strong><span>General information, not diagnosis</span></div><button type="button" aria-label="Close assistant" data-chat-close>&times;</button></div>
+      <div class="chat-messages" data-chat-messages><div class="chat-message chat-message-assistant">Hi. Ask me about fracture terms, X-ray screening, or how this app works.</div></div>
+      <form class="chat-form" data-chat-form><input type="text" maxlength="1200" placeholder="Ask a question..." aria-label="Chat question" data-chat-input required><button type="submit" aria-label="Send question">&#8594;</button></form>
+    </section>
+  </aside>
+
   <footer class="site-footer">
     <div class="shell footer-grid">
       <div>

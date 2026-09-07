@@ -1,12 +1,12 @@
 # FractureScope
 
-AI-assisted X-ray fracture screening with a Flask web interface. YOLOv8 performs local detection and Groq Vision provides a possible pattern and explanatory observations for each detected crop.
+AI-assisted X-ray fracture screening with a Flask web interface. YOLOv8 performs local fracture-region detection, and Groq provides an optional text chatbot for general questions.
 
 ## Production contract
 
 - Python: `3.11.9`
-- Inference: ONNX Runtime uses `yolov8_model.onnx`, exported from `yolov8_model.pt`; Groq Vision analyzes padded detection crops
-- Runtime: CPU-only, one ONNX session per worker, dynamic 320px stride-aligned input, up to three Groq region requests per upload
+- Inference: ONNX Runtime uses `yolov8_model.onnx`, exported from `yolov8_model.pt`
+- Runtime: CPU-only, one ONNX session per worker, dynamic 320px stride-aligned input
 - Web server: one Gunicorn worker and one thread
 - Database: PostgreSQL in production or SQLite for local development
 - Health check: `/health`
@@ -19,19 +19,19 @@ Render can use `render.yaml` directly. The equivalent start command is:
 gunicorn app:app --workers 1 --threads 1 --timeout 300
 ```
 
-Set `SECRET_KEY`, `DATABASE_URL`, and `GROQ_API_KEY` in the Render environment. `GROQ_VISION_MODEL` is configurable and defaults to `meta-llama/llama-4-scout-17b-16e-instruct`. `YOLO_ONNX_MODEL_PATH` is optional and defaults to `yolov8_model.onnx`.
+Set `SECRET_KEY`, `DATABASE_URL`, and `GROQ_API_KEY` in the Render environment. `GROQ_CHAT_MODEL` is configurable and defaults to `llama-3.1-8b-instant`. `YOLO_ONNX_MODEL_PATH` is optional and defaults to `yolov8_model.onnx`.
 
 ## Environment variables
 
 ```text
 SECRET_KEY=your-secret-key
 GROQ_API_KEY=your-groq-api-key
-GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
-GROQ_MAX_OUTPUT_TOKENS=600
+GROQ_CHAT_MODEL=llama-3.1-8b-instant
+GROQ_CHAT_MAX_TOKENS=300
 DATABASE_URL=your-postgresql-url
 ```
 
-Never commit real values. `GROQ_MAX_OUTPUT_TOKENS` keeps structured responses below low-tier Groq output-token limits. When `GROQ_API_KEY` is absent or the API fails, YOLO results are still saved and displayed with an unavailable-analysis message. Images with no YOLO detections do not call Groq.
+Never commit real values. When `GROQ_API_KEY` is absent or the API fails, the chatbot displays an unavailable message. YOLO detection does not depend on Groq.
 
 ## Local verification
 
@@ -44,4 +44,4 @@ The development-only export uses `requirements-export.txt`, then runs `python ex
 
 Then open `http://localhost:5000/health`. It returns HTTP 200 without authentication and reports `yolo_loaded`, `groq_configured`, and database status without exposing secrets.
 
-Each prediction stores the existing `hybrid_result` JSON column. Each region contains `bbox`, `yolo_confidence`, `possible_fracture_type`, `confidence_level`, `description`, `observations`, `limitations`, and `recommendation`. The result page always labels the pattern as possible and includes a medical disclaimer.
+Each prediction stores the existing `hybrid_result` JSON column with YOLO region boxes, classes, and confidence values. The result page includes a medical disclaimer.
