@@ -6,6 +6,7 @@ import re
 import gc
 import json
 import base64
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -286,8 +287,9 @@ def analyze_crop_with_groq(crop, region_number):
     client = _groq_client_instance()
     if client is None:
         return _fallback_analysis("Groq Vision analysis is unavailable because GROQ_API_KEY is not configured.")
-    buffer = tempfile.SpooledTemporaryFile(max_size=2 * 1024 * 1024)
+    buffer = None
     try:
+        buffer = tempfile.SpooledTemporaryFile(max_size=2 * 1024 * 1024)
         prepared = crop.copy()
         prepared.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
         prepared.save(buffer, format="JPEG", quality=88, optimize=True)
@@ -331,7 +333,8 @@ def analyze_crop_with_groq(crop, region_number):
         app.logger.exception("GROQ ANALYSIS FAILED region=%s", region_number)
         return _fallback_analysis("Analysis temporarily unavailable.")
     finally:
-        buffer.close()
+        if buffer is not None:
+            buffer.close()
         app.logger.info("GROQ ANALYSIS COMPLETE region=%s elapsed=%.2fs", region_number, time.perf_counter() - started)
 
 
