@@ -6,7 +6,7 @@ AI-assisted X-ray fracture screening with a Flask web interface. YOLOv8 performs
 
 - Python: `3.11.9`
 - Inference: YOLOv8 uses `yolov8_model.pt`; Groq Vision analyzes padded detection crops
-- Runtime: CPU-only, one YOLO instance per worker, YOLO inference size `384`, up to five Groq region requests per upload
+- Runtime: CPU-only, one YOLO instance per worker, YOLO inference size `320`, up to three Groq region requests per upload
 - Web server: one Gunicorn worker and one thread
 - Database: PostgreSQL in production or SQLite for local development
 - Health check: `/health`

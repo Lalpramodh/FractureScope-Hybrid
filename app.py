@@ -52,7 +52,7 @@ DB_PATH = Path(os.getenv("DB_PATH", BASE_DIR / "fracturescope.db"))
 UPLOAD_FOLDER = BASE_DIR / "static" / "uploads"
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "webp"}
 GROQ_VISION_MODEL = os.getenv("GROQ_VISION_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
-GROQ_MAX_REGIONS = 5
+GROQ_MAX_REGIONS = max(1, int(os.getenv("GROQ_MAX_REGIONS", "3")))
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY")
@@ -74,8 +74,7 @@ _model = None
 _model_lock = threading.Lock()
 _inference_lock = threading.Lock()
 _groq_client = None
-INFERENCE_SIZE = 384
-MAX_INFERENCE_DIMENSION = 2048
+INFERENCE_SIZE = 320
 GROQ_CROP_PADDING = float(os.getenv("GROQ_CROP_PADDING", "0.08"))
 
 
@@ -228,35 +227,11 @@ def load_yolo_model():
             "half": False,
             "verbose": False,
         })
-        detector.fuse()
-        warmup_started = time.perf_counter()
-        warmup_image = Image.new("RGB", (INFERENCE_SIZE, INFERENCE_SIZE))
-        try:
-            with torch.inference_mode():
-                warmup_results = detector.predict(
-                    source=warmup_image,
-                    device="cpu",
-                    imgsz=INFERENCE_SIZE,
-                    batch=1,
-                    half=False,
-                    max_det=20,
-                    verbose=False,
-                    save=False,
-                    show=False,
-                    stream=False,
-                )
-        finally:
-            warmup_image.close()
-            if "warmup_results" in locals():
-                del warmup_results
-            gc.collect()
-        torch.set_num_threads(1)
         _model = detector
         app.logger.info(
-            "YOLO LOAD COMPLETE pid=%s elapsed=%.2fs warmup=%.2fs torch_threads=%s available_memory_mb=%s",
+            "YOLO LOAD COMPLETE pid=%s elapsed=%.2fs torch_threads=%s available_memory_mb=%s",
             os.getpid(),
             time.perf_counter() - model_started,
-            time.perf_counter() - warmup_started,
             torch.get_num_threads(),
             available_memory_mb(),
         )
@@ -268,26 +243,33 @@ def yolo_predict(filepath):
     app.logger.info("INFERENCE REQUEST START pid=%s", os.getpid())
     detector = load_yolo_model()
     preprocessing_started = time.perf_counter()
-    inference_path = prepare_inference_image(filepath)
-    app.logger.info(
-        "Image preprocessing completed in %.2f seconds",
-        time.perf_counter() - preprocessing_started,
-    )
+    inference_image = None
     results = None
     try:
+        with Image.open(filepath) as source:
+            source.verify()
+        with Image.open(filepath) as source:
+            inference_image = source.convert("RGB")
+            inference_image.thumbnail((INFERENCE_SIZE, INFERENCE_SIZE), Image.Resampling.LANCZOS)
+            app.logger.info(
+                "Inference image prepared size=%sx%s elapsed=%.2fs",
+                inference_image.width,
+                inference_image.height,
+                time.perf_counter() - preprocessing_started,
+            )
         inference_started = time.perf_counter()
         app.logger.info("YOLO INFERENCE START pid=%s available_memory_mb=%s", os.getpid(), available_memory_mb())
         try:
             with torch.inference_mode():
                 results = detector.predict(
-                    source=str(inference_path),
+                    source=inference_image,
                     device="cpu",
                     imgsz=INFERENCE_SIZE,
                     batch=1,
                     conf=0.25,
                     iou=0.45,
                     half=False,
-                    max_det=20,
+                    max_det=10,
                     verbose=False,
                     save=False,
                     show=False,
@@ -309,14 +291,13 @@ def yolo_predict(filepath):
                 "yolo_class": names.get(int(result.boxes.cls[index].item()), str(int(result.boxes.cls[index].item()))) if isinstance(names, dict) else str(int(result.boxes.cls[index].item())),
                 "yolo_confidence": float(result.boxes.conf[index].item()),
             })
-        with Image.open(inference_path) as inference_image:
-            inference_size = inference_image.size
+        inference_size = inference_image.size
         return {"detections": detections, "inference_size": inference_size}
     finally:
         if results:
             del results
-        if inference_path != Path(filepath):
-            inference_path.unlink(missing_ok=True)
+        if inference_image is not None:
+            inference_image.close()
         gc.collect()
 
 
@@ -383,6 +364,7 @@ def _parse_groq_response(content):
 
 
 def analyze_crop_with_groq(crop, region_number):
+    started = time.perf_counter()
     client = _groq_client_instance()
     if client is None:
         return _fallback_analysis("Groq Vision analysis is unavailable because GROQ_API_KEY is not configured.")
@@ -432,13 +414,15 @@ def analyze_crop_with_groq(crop, region_number):
         return _fallback_analysis("Analysis temporarily unavailable.")
     finally:
         buffer.close()
+        app.logger.info("GROQ ANALYSIS COMPLETE region=%s elapsed=%.2fs", region_number, time.perf_counter() - started)
 
 
 def _run_hybrid_prediction(filepath):
     started = time.perf_counter()
-    app.logger.info("Hybrid prediction started")
+    app.logger.info("YOLO + Groq prediction started")
     results = yolo_predict(filepath)
     if not results["detections"]:
+        app.logger.info("YOLO detections=%s", 0)
         return {"detections": [], "summary": "No fracture region detected by the YOLO model."}, None
     original_image = None
     try:
@@ -447,24 +431,33 @@ def _run_hybrid_prediction(filepath):
         original_width, original_height = original_image.size
         inference_width, inference_height = results["inference_size"]
         detections = []
-        for index, yolo_detection in enumerate(results["detections"][:GROQ_MAX_REGIONS]):
+        for yolo_detection in results["detections"]:
             raw_box = yolo_detection["raw_bbox"]
             scale_x = original_width / inference_width
             scale_y = original_height / inference_height
             bbox = [round(raw_box[0] * scale_x), round(raw_box[1] * scale_y), round(raw_box[2] * scale_x), round(raw_box[3] * scale_y)]
-            crop_box = _padded_box(bbox, original_width, original_height)
-            crop = original_image.crop(crop_box)
-            groq_analysis = analyze_crop_with_groq(crop, index + 1)
-            crop.close()
             detections.append({
                 "bbox": bbox,
                 "yolo_class": yolo_detection["yolo_class"],
                 "yolo_confidence": yolo_detection["yolo_confidence"],
-                **groq_analysis,
+                **_fallback_analysis("This region was not sent to Groq because the per-image analysis limit was reached."),
             })
+        app.logger.info("YOLO detections=%s", len(detections))
+        groq_indices = sorted(
+            range(len(detections)),
+            key=lambda item: detections[item]["yolo_confidence"],
+            reverse=True,
+        )[:GROQ_MAX_REGIONS]
+        for index in groq_indices:
+            crop_box = _padded_box(detections[index]["bbox"], original_width, original_height)
+            crop = original_image.crop(crop_box)
+            try:
+                detections[index].update(analyze_crop_with_groq(crop, index + 1))
+            finally:
+                crop.close()
         annotated_path = _annotate_image(filepath, detections)
         result = {"detections": detections, "summary": f"{len(detections)} fracture region(s) detected"}
-        app.logger.info("Hybrid prediction completed in %.2fs", time.perf_counter() - started)
+        app.logger.info("YOLO + Groq prediction completed in %.2fs", time.perf_counter() - started)
         return result, annotated_path
     finally:
         del results
@@ -497,23 +490,6 @@ def save_upload(upload):
     filepath = UPLOAD_FOLDER / filename
     upload.save(filepath)
     return filepath, f"uploads/{filename}"
-
-
-def prepare_inference_image(filepath):
-    """Bound inference memory for unusually large uploads while retaining the original."""
-    source = Path(filepath)
-    with Image.open(source) as image:
-        image.verify()
-    with Image.open(source) as image:
-        app.logger.info("Inference image dimensions: %sx%s", image.width, image.height)
-        if max(image.size) <= MAX_INFERENCE_DIMENSION:
-            return source
-        image.thumbnail((MAX_INFERENCE_DIMENSION, MAX_INFERENCE_DIMENSION), Image.Resampling.LANCZOS)
-        temporary = tempfile.NamedTemporaryFile(suffix=".jpg", dir=UPLOAD_FOLDER, delete=False)
-        temporary_path = Path(temporary.name)
-        temporary.close()
-        image.convert("RGB").save(temporary_path, format="JPEG", quality=95)
-        return temporary_path
 
 
 @app.route("/health")
